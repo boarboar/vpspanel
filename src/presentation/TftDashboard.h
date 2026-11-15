@@ -12,6 +12,8 @@
 #include <TFT_eSPI.h>
 #endif
 
+class TouchCalibrationStore;
+
 // Presentation adapter: renders the same monitor snapshots as the web
 // dashboard on an ILI9341 TFT. Runs from its own FreeRTOS task, so SPI drawing
 // never delays HTTP responses or SSH polling.
@@ -20,16 +22,27 @@
 // fields whose value or colour changed are written to the panel. The dashboard
 // is never cleared and repainted as a whole, which is what caused the visible
 // flicker when the screen was refreshed every couple of seconds.
+//
+// An XPT2046 resistive touch controller (sharing the display SPI bus) is used
+// to open a per-server detail screen: tapping a card shows it, tapping the
+// detail screen returns to the dashboard.
 class TftDashboard {
  public:
-  TftDashboard(MonitorService& monitor, ServerRegistry& registry);
+  TftDashboard(MonitorService& monitor, ServerRegistry& registry,
+               TouchCalibrationStore& touchCalibration);
 
-  void begin();   // initialise the panel and draw the splash screen
+  // Initialise the panel, show the splash screen and (on first boot) offer
+  // touch calibration. Called from setup() before the Wi-Fi connection is
+  // attempted, so the display is never blank while the station associates.
+  void begin(const String& wifiSsid);
   void update();  // cheap poll + incremental redraw; call frequently
 
  private:
 #if VPSPANEL_HAS_DISPLAY
   static constexpr size_t kServersPerPage = 2;
+  static constexpr size_t kTouchCalValues = 5;
+
+  enum class View : uint8_t { Dashboard, Detail };
 
   // Which set of widgets occupies the lower half of a card. When it changes,
   // that area is cleared once before the new widgets are drawn.
@@ -65,7 +78,26 @@ class TftDashboard {
     uint16_t barColor = 0;
   };
 
-  void drawSplash();
+  // Fields of the per-server detail screen. The frame (background plus static
+  // labels) is drawn once per visit; the values use the same incremental
+  // TextField mechanism as the dashboard.
+  struct DetailCache {
+    bool frameDrawn = false;
+    TextField name;
+    TextField chip;
+    TextField endpoint;
+    TextField load;
+    TextField mem;
+    TextField temp;
+    TextField age;
+    TextField took;
+    TextField note;
+    uint8_t noteKind = 0;  // 0 = nothing, 1 = waiting, 2 = error
+    int barFilled = -1;
+    uint16_t barColor = 0;
+  };
+
+  void drawSplash(const String& wifiSsid);
   void renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots, size_t pages);
   void ensureChrome();
   void updateHeader();
@@ -79,7 +111,31 @@ class TftDashboard {
                       int clearX, int clearW, uint8_t font, uint16_t color);
   String footerText() const;
 
+  void calibrateTouch();
+  bool touchPressedSignal(uint16_t z) const;
+  bool readTouchDirect(uint16_t& rawX, uint16_t& rawY);
+  bool readTouch(uint16_t& x, uint16_t& y);
+  void handleTouch();
+
+  void openDetail(const String& serverId);
+  void closeDetail();
+  void resetDetail();
+  void invalidateDashboard();
+  void drawDetailFrame();
+  void renderDetail(const MonitorService::Snapshot& snapshot);
+
   TFT_eSPI tft_;
+  TouchCalibrationStore& touchCalibration_;
+  uint16_t touchCal_[kTouchCalValues] = {
+      VPSPANEL_TOUCH_CAL_X0, VPSPANEL_TOUCH_CAL_X1, VPSPANEL_TOUCH_CAL_Y0,
+      VPSPANEL_TOUCH_CAL_Y1, VPSPANEL_TOUCH_CAL_FLAGS};
+  View view_ = View::Dashboard;
+  String detailId_;
+  bool touchDown_ = false;
+  uint32_t lastTouchMs_ = 0;
+  uint32_t lastTouchDebugMs_ = 0;
+  bool touchDebugPressed_ = false;
+
   CardCache cards_[kServersPerPage];
   TextField headerRight_;
   TextField footerLeft_;
@@ -88,6 +144,8 @@ class TftDashboard {
   bool chromeDrawn_ = false;
   bool emptyDrawn_ = false;
   uint32_t lastPageMs_ = 0;
+
+  DetailCache detail_;
 #endif
 
   MonitorService& monitor_;

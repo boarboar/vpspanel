@@ -79,6 +79,18 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 - Footer: poll interval, `polling...` or the age of the last cycle, and `page x/y`.
 - With more than two servers the view rotates to the next page every 7 s;
   values refresh every 2 s (or immediately when a new poll cycle completes).
+- The panel is initialised before the Wi-Fi association and shows a splash
+  screen with the SSID it is about to join, so it is never blank during boot.
+- Touching a server card opens a full-screen detail view (state, user@host:port,
+  load, memory with bar, CPU temperature, poll age/duration and the SSH error
+  text when a poll failed). Touching anywhere on that screen returns to the
+  dashboard.
+
+The touch controller is an XPT2046 that shares the display SPI bus. The display
+task samples it every 20 ms, because a tap only lasts around 100 ms and a slower
+loop misses most presses. A press is recognised from the controller's pressure
+reading (`Z`) or, as a second opinion, from the `T_IRQ` line; no extra task or
+GPIO interrupt is needed.
 
 ### Wiring
 
@@ -89,10 +101,20 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 | CS             | GPIO 7   |                                        |
 | RESET          | GPIO 10  |                                        |
 | DC             | GPIO 3   |                                        |
-| MOSI           | GPIO 6   |                                        |
-| SCK            | GPIO 4   |                                        |
-| MISO           | GPIO 5   | not needed for drawing, but configured |
+| MOSI           | GPIO 6   | shared with T_DIN                      |
+| SCK            | GPIO 4   | shared with T_CLK                      |
+| MISO           | GPIO 5   | shared with T_DO                       |
 | LED            | 3V3      | see backlight note below               |
+
+Touch controller (same module):
+
+| XPT2046 | ESP32-C3 | Note                                  |
+| ------- | -------- | ------------------------------------- |
+| T_CLK   | GPIO 4   | same SPI clock as the display         |
+| T_DIN   | GPIO 6   | same SPI MOSI                        |
+| T_DO    | GPIO 5   | same SPI MISO                        |
+| T_CS    | GPIO 1   | `-DTOUCH_CS=1` in `platformio.ini`    |
+| T_IRQ   | GPIO 0   | active low, input with pull-up         |
 
 These are the defaults in `src/config/display_config.h`, mirrored by the `-DTFT_*`
 flags in `platformio.ini`; change both to match your board. Avoid GPIO 2, 8 and 9
@@ -108,9 +130,17 @@ flags in `platformio.ini`; change both to match your board. Avoid GPIO 2, 8 and 
   - `VPSPANEL_TFT_*` — the pin values TFT_eSPI must use,
     `VPSPANEL_TFT_ROTATION` (`1` or `3`; use `3` if the image is upside down),
     and `VPSPANEL_TFT_BL` / `VPSPANEL_TFT_BACKLIGHT_ON`.
-- `platformio.ini` — the matching `-DTFT_*` / `-DUSER_SETUP_LOADED` build flags
-  that configure the **TFT_eSPI library itself** (driver, 240x320 size, pins,
-  40 MHz SPI, fonts 1/2/4). TFT_eSPI is compiled as a separate library and does
+  - `VPSPANEL_TOUCH_CS` / `VPSPANEL_TOUCH_IRQ` — XPT2046 chip select and
+    interrupt pins (`T_IRQ` is optional; set it to `-1` when it is not wired).
+  - `VPSPANEL_TOUCH_CAL_*` — fallback touch calibration used until the panel
+    has been calibrated (calibration is offered on every boot).
+  - `VPSPANEL_TOUCH_Z_THRESHOLD` — pressure above which a touch is accepted.
+  - `VPSPANEL_TOUCH_DEBUG` — set to `1` to print every touch sample on the
+    serial console.
+- `platformio.ini` — the matching `-DTFT_*` / `-DTOUCH_CS` /
+  `-DUSER_SETUP_LOADED` build flags that configure the **TFT_eSPI library
+  itself** (driver, 240x320 size, pins, 40 MHz SPI, fonts 1/2/4, touch CS).
+  TFT_eSPI is compiled as a separate library and does
   not see this project's headers, so these flags are the authoritative setup for
   the driver. `static_assert`s in `TftDashboard.cpp` fail the build if they drift
   from `display_config.h`.
@@ -136,6 +166,55 @@ source. If colours are inverted (light background instead of dark), add
 The panel is drawn from its own 10 KB FreeRTOS task, so a slow SPI refresh never
 blocks HTTP responses or the SSH poller.
 
+**Touch calibration:** every boot the splash screen shows
+`hold screen to calibrate touch`. Keep a finger on the panel for a moment and
+TFT_eSPI draws the four calibration crosses; the resulting values are stored in
+NVS (`vpspanel` / `touchcal`) and reused on later boots. Ignoring the prompt
+keeps the stored (or fallback) calibration and continues normally after about
+two seconds. A stored calibration that is out of the controller's raw range is
+ignored, so a bad calibration cannot make the whole screen appear dead.
+
+**Touch troubleshooting:** every boot prints one line such as
+
+```
+Touch: idle Z=0 (threshold 200), T_IRQ=1
+```
+
+- `idle Z` stays at `0` when the SPI path to the XPT2046 is not working (wrong
+  `T_CS`, no MISO, controller unpowered). With a finger on the panel it should
+  rise well above the threshold.
+- If idle `Z` is already above the threshold the panel is being seen as
+  permanently pressed: raise `VPSPANEL_TOUCH_Z_THRESHOLD`.
+- `T_IRQ=1` with nothing touching the panel is correct (active low).
+
+Set `VPSPANEL_TOUCH_DEBUG` to `1` for a line per press/release with the raw and
+mapped coordinates.
+
+## Built-in status LED
+
+The board's built-in LED gives feedback even when the panel is absent or before
+Wi-Fi is up:
+
+- **Wi-Fi connecting / reconnecting** — 2 Hz blink.
+- **Polling cycle running** — 2 Hz blink.
+- **Idle** — off.
+
+On most ESP32-C3 boards (ESP32-C3 SuperMini and similar) the built-in LED is a
+plain single-colour LED on GPIO 8 wired to 3V3, so it lights when the pin is
+driven LOW. That is the default. The official ESP32-C3-DevKitM-1 instead has an
+addressable WS2812 RGB LED on GPIO 8; the Arduino core exposes it as
+`LED_BUILTIN`. Configuration lives in `src/config/led_config.h`:
+
+- `VPSPANEL_LED_PIN` — defaults to GPIO 8; set to `-1` on a board with no usable
+  built-in LED.
+- `VPSPANEL_LED_ADDRESSABLE` — `0` (default) for a plain GPIO LED, `1` for the
+  WS2812/RGB LED of the official DevKitM-1 (`LED_BUILTIN` API).
+- `VPSPANEL_LED_ACTIVE_HIGH` — plain LEDs only; `0` (default) for an LED wired
+  to 3V3, `1` for an LED wired to GND.
+
+The LED is serviced from the loop task (`StatusLed::update()` is non-blocking)
+and also from the blocking Wi-Fi connect loop in `setup()`.
+
 ## Architecture
 
 ```
@@ -143,6 +222,7 @@ src/
 ├── main.cpp                     composition root: wiring, Wi-Fi, tasks
 ├── config/
 │   ├── display_config.h             TFT enable flag, pins, rotation
+│   ├── led_config.h                 built-in status LED pin / polarity
 │   ├── wifi_credentials.example.h   template (committed)
 │   └── wifi_credentials.h           real credentials (git-ignored)
 ├── domain/                      business logic, no Arduino UI/HTTP/storage code
@@ -156,7 +236,9 @@ src/
 │   └── MonitorService.{h,cpp}   scheduling, polling, latest results
 ├── infra/                       concrete adapters for the outside world
 │   ├── NvsServerStore.{h,cpp}   JSON config in the NVS flash partition
-│   └── SshMetricsProvider.{h,cpp}  LibSSH-ESP32 implementation
+│   ├── SshMetricsProvider.{h,cpp}  LibSSH-ESP32 implementation
+│   ├── StatusLed.{h,cpp}        built-in LED: Wi-Fi + polling feedback
+│   └── TouchCalibrationStore.{h,cpp}  XPT2046 calibration in NVS
 └── presentation/                output only, talks to the domain services
     ├── ConsoleView.{h,cpp}      serial output (MonitorService listener)
     ├── WebDashboard.{h,cpp}     HTTP routes, forms, JSON API
@@ -183,7 +265,11 @@ different presentation (MQTT, display, etc.) only needs to observe
 - **Polling task** — dedicated 40 KB stack for libssh/mbedTLS. It calls
   `libssh_begin()` once and then polls when `MonitorService::pollDue()` says so.
 - **Display task** — 10 KB stack (only when `VPSPANEL_HAS_DISPLAY = 1`). It
-  redraws the TFT at its own pace and never touches the network.
+  redraws the TFT at its own pace, samples the touch controller every 20 ms so
+  short taps are not lost, and never touches the network. The panel is
+  initialised from `setup()` before Wi-Fi, then handed over to this task.
+- **Status LED** — no task of its own: non-blocking `StatusLed::update()` calls
+  from the loop task and the boot-time Wi-Fi connect loop drive the blink.
 - Shared state (`ServerRegistry`, latest metrics) is protected by FreeRTOS
   mutexes. A slow or unreachable server delays the next poll, not the web UI.
 

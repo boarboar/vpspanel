@@ -15,6 +15,8 @@
 #include "domain/ServerRegistry.h"
 #include "infra/NvsServerStore.h"
 #include "infra/SshMetricsProvider.h"
+#include "infra/StatusLed.h"
+#include "infra/TouchCalibrationStore.h"
 #include "presentation/ConsoleView.h"
 #include "presentation/TftDashboard.h"
 #include "presentation/WebDashboard.h"
@@ -41,7 +43,9 @@ SshMetricsProvider metricsProvider;
 MonitorService monitor(registry, metricsProvider);
 ConsoleView consoleView;
 WebDashboard webDashboard(registry, monitor);
-TftDashboard tftDashboard(monitor, registry);
+TouchCalibrationStore touchCalibration;
+TftDashboard tftDashboard(monitor, registry, touchCalibration);
+StatusLed statusLed;
 
 TaskHandle_t pollTaskHandle = nullptr;
 uint32_t lastWifiAttemptMs = 0;
@@ -62,15 +66,23 @@ void connectWifiDuringBoot() {
   WiFi.setHostname(WIFI_HOSTNAME);
 
   consoleView.printWifiConnecting(WIFI_SSID);
+  statusLed.setWifiConnecting(true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   const uint32_t started = millis();
+  uint32_t lastDotMs = started;
   while (WiFi.status() != WL_CONNECTED && (millis() - started) < kWifiConnectTimeoutMs) {
-    delay(250);
-    Serial.print('.');
+    statusLed.update();
+    if ((millis() - lastDotMs) >= 250) {
+      lastDotMs = millis();
+      Serial.print('.');
+    }
+    delay(20);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    statusLed.setWifiConnecting(false);
+    statusLed.update();
     consoleView.printWifiConnected(WiFi.localIP().toString());
     wifiWasConnected = true;
     startMdns();
@@ -119,13 +131,18 @@ void pollTask(void*) {
 
 #if VPSPANEL_HAS_DISPLAY
 // SPI drawing gets its own small task: a slow panel refresh must not delay
-// HTTP requests or the SSH poller.
+// HTTP requests or the SSH poller. The panel itself is initialised earlier in
+// setup(), before Wi-Fi, so the splash screen is visible while the station
+// associates; this task only replaces it with the dashboard.
+//
+// The loop runs fast because the same task also samples the touch controller.
+// A tap only lasts ~100 ms, so a slow loop (it used to be 250 ms) misses most
+// presses entirely. update() is cheap when nothing changed: the redraws
+// themselves are throttled internally.
 void displayTask(void*) {
-  tftDashboard.begin();
-
   for (;;) {
     tftDashboard.update();
-    vTaskDelay(pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 #endif
@@ -137,6 +154,15 @@ void setup() {
   delay(300);
 
   consoleView.printBanner();
+
+  statusLed.begin();
+
+#if VPSPANEL_HAS_DISPLAY
+  // Bring the panel up before touching the network. Initialising it after the
+  // Wi-Fi association left the display blank for several seconds.
+  tftDashboard.begin(WIFI_SSID);
+  Serial.println(F("Display: splash screen shown"));
+#endif
 
   registry.begin();
   monitor.begin();
@@ -167,5 +193,10 @@ void setup() {
 void loop() {
   webDashboard.handle();
   maintainWifi();
+
+  statusLed.setWifiConnecting(WiFi.status() != WL_CONNECTED);
+  statusLed.setPolling(monitor.isPolling());
+  statusLed.update();
+
   delay(2);
 }

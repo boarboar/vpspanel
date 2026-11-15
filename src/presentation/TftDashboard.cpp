@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "infra/TouchCalibrationStore.h"
+
 #if VPSPANEL_HAS_DISPLAY
 
 #include <WiFi.h>
@@ -17,6 +19,11 @@ static_assert(TFT_DC == VPSPANEL_TFT_DC, "TFT_eSPI pins do not match display_con
 static_assert(TFT_RST == VPSPANEL_TFT_RST, "TFT_eSPI pins do not match display_config.h");
 static_assert(TFT_BL == VPSPANEL_TFT_BL, "TFT_eSPI backlight does not match display_config.h");
 static_assert(TFT_WIDTH == 240 && TFT_HEIGHT == 320, "Expected a 240x320 ILI9341 panel");
+#ifndef TOUCH_CS
+#error "TFT_eSPI touch support is disabled: add -DTOUCH_CS=<pin> to platformio.ini"
+#endif
+static_assert(TOUCH_CS == VPSPANEL_TOUCH_CS,
+              "TFT_eSPI touch CS does not match display_config.h");
 
 namespace {
 
@@ -52,13 +59,61 @@ constexpr int kCardY0 = 34;
 constexpr uint32_t kRefreshMs = 1000;
 constexpr uint32_t kPageMs = 7000;
 
+// The detail screen carries a poll-age field that only changes once a second,
+// so redrawing it faster than this is pointless. The touch controller is still
+// polled on every update() call (every ~20 ms) by the display task.
+constexpr uint32_t kDetailRefreshMs = 250;
+
 constexpr int kBarX = 95;
 constexpr int kBarY = 75;
 constexpr int kBarW = 130;
 constexpr int kBarH = 6;
 
+// Detail screen layout.
+constexpr int kDetailHeaderH = 28;
+constexpr int kDetailDivider1Y = 80;
+constexpr int kDetailDivider2Y = 130;
+constexpr int kDetailBarX = 10;
+constexpr int kDetailBarY = 166;
+constexpr int kDetailBarW = 300;
+constexpr int kDetailBarH = 6;
+constexpr int kDetailNoteY = 196;
+
 int cardY(size_t slot) {
   return kCardY0 + static_cast<int>(slot) * (kCardH + kCardGap);
+}
+
+// Maps one raw XPT2046 axis onto a screen axis, clamping values so a slightly
+// out-of-range calibration can never wrap around to a far corner.
+int mapTouchAxis(uint16_t raw, uint16_t origin, uint16_t span, int size) {
+  if (span == 0) span = 1;
+  const int value =
+      (static_cast<int>(raw) - static_cast<int>(origin)) * size / static_cast<int>(span);
+  if (value < 0) return 0;
+  if (value >= size) return size - 1;
+  return value;
+}
+
+// The XPT2046 reports 12-bit raw values (0..4095) and a calibration stores the
+// raw origin plus the raw span of each axis. A stored calibration that does not
+// fit those bounds (for example from an interrupted wizard) maps every tap to
+// the same corner, which looks exactly like a dead touch screen, so it is
+// rejected in favour of the compile-time fallback.
+bool calibrationLooksValid(const uint16_t cal[5]) {
+  const uint16_t x0 = cal[0];
+  const uint16_t xSpan = cal[1];
+  const uint16_t y0 = cal[2];
+  const uint16_t ySpan = cal[3];
+  if (x0 < 50 || x0 > 4000 || y0 < 50 || y0 > 4000) return false;
+  if (xSpan < 400 || xSpan > 4200 || ySpan < 400 || ySpan > 4200) return false;
+  return true;
+}
+
+// A raw axis value of 0 or 4095 means the controller returned no real sample
+// (wrong chip select, missing MISO, controller not powered). A genuine touch
+// always lands inside this window.
+bool plausibleRaw(uint16_t value) {
+  return value > 80 && value < 4050;
 }
 
 String fitText(const String& text, size_t maxChars) {
@@ -127,23 +182,123 @@ void drawWrapped(TFT_eSPI& tft, const String& text, int x, int y, int maxX, int 
 
 }  // namespace
 
-TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry)
-    : monitor_(monitor), registry_(registry) {}
+TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry,
+                           TouchCalibrationStore& touchCalibration)
+    : tft_(), touchCalibration_(touchCalibration), monitor_(monitor), registry_(registry) {}
 
-void TftDashboard::begin() {
+void TftDashboard::begin(const String& wifiSsid) {
   tft_.init();
   tft_.setRotation(VPSPANEL_TFT_ROTATION);
+
+#if VPSPANEL_TOUCH_IRQ >= 0
+  // PENIRQ of the XPT2046 is an open-drain, active-low output.
+  pinMode(VPSPANEL_TOUCH_IRQ, INPUT_PULLUP);
+#endif
+
+  // Use the calibration stored in NVS, or the compile-time fallback when the
+  // wizard has never been run or the stored values are unusable.
+  if (touchCalibration_.load(touchCal_) && !calibrationLooksValid(touchCal_)) {
+    Serial.println(F("Touch: stored calibration is implausible, using defaults"));
+    const uint16_t defaults[kTouchCalValues] = {
+        VPSPANEL_TOUCH_CAL_X0, VPSPANEL_TOUCH_CAL_X1, VPSPANEL_TOUCH_CAL_Y0,
+        VPSPANEL_TOUCH_CAL_Y1, VPSPANEL_TOUCH_CAL_FLAGS};
+    for (size_t i = 0; i < kTouchCalValues; ++i) touchCal_[i] = defaults[i];
+  }
+  tft_.setTouch(touchCal_);
+
   tft_.fillScreen(kBg);
-  drawSplash();
+  drawSplash(wifiSsid);
+
+  // Offer calibration on every boot: holding the screen for a moment starts
+  // the wizard, ignoring it keeps the stored/default calibration.
+  tft_.setTextDatum(MC_DATUM);
+  tft_.setTextColor(kMuted, kBg);
+  tft_.drawString("hold screen to calibrate touch", kScreenW / 2, kScreenH - 18, 1);
+
+  const uint32_t started = millis();
+  bool touched = false;
+  while ((millis() - started) < 2000) {
+    if (tft_.getTouchRawZ() >= VPSPANEL_TOUCH_Z_THRESHOLD) {
+      touched = true;
+      break;
+    }
+    delay(20);
+  }
+
+  if (touched) {
+    // calibrateTouch() samples raw positions itself, so it can only be entered
+    // when the pressure reading already works; otherwise it would block here
+    // forever waiting for a sample that never arrives.
+    calibrateTouch();
+    tft_.fillScreen(kBg);
+    drawSplash(wifiSsid);
+  }
+
+  // One diagnostic line per boot: it shows whether the controller answers at
+  // all. Z stays at 0 when the SPI/CS wiring to the XPT2046 is broken, while a
+  // value clearly above the threshold without a finger on the panel means the
+  // threshold is too low.
+#if VPSPANEL_TOUCH_IRQ >= 0
+  const int irqLevel = digitalRead(VPSPANEL_TOUCH_IRQ);
+#else
+  const int irqLevel = -1;
+#endif
+  Serial.printf("Touch: idle Z=%u (threshold %u), T_IRQ=%d\n", tft_.getTouchRawZ(),
+                static_cast<unsigned>(VPSPANEL_TOUCH_Z_THRESHOLD), irqLevel);
 
   initialized_ = true;
   lastPageMs_ = millis();
+}
+
+void TftDashboard::calibrateTouch() {
+  tft_.calibrateTouch(touchCal_, kAccent, kBg, 12);
+
+  if (touchCalibration_.save(touchCal_)) {
+    Serial.println(F("Touch: calibration saved"));
+  } else {
+    Serial.println(F("Touch: calibration could not be saved"));
+  }
+  tft_.setTouch(touchCal_);
 }
 
 void TftDashboard::update() {
   if (!initialized_) return;
 
   const uint32_t now = millis();
+
+  // Touch handling is edge triggered: a press on a dashboard card opens that
+  // server's detail screen, while a press on the detail screen (or anywhere
+  // else) returns to the dashboard.
+  handleTouch();
+
+  if (view_ == View::Detail) {
+    // update() now runs every ~20 ms so taps are sampled often enough; the
+    // detail values themselves only need an occasional refresh.
+    if (detail_.frameDrawn && (now - lastRenderMs_) < kDetailRefreshMs) return;
+
+    const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+    const MonitorService::Snapshot* detail = nullptr;
+    for (const auto& snapshot : snapshots) {
+      if (snapshot.server.id == detailId_) {
+        detail = &snapshot;
+        break;
+      }
+    }
+
+    if (detail == nullptr) {
+      // The server disappeared from the configuration while its page was up.
+      closeDetail();
+    } else {
+      if (!detail_.frameDrawn) {
+        drawDetailFrame();
+        detail_.frameDrawn = true;
+      }
+      renderDetail(*detail);
+      lastRenderMs_ = now;
+      return;
+    }
+  }
+
   const uint32_t cycle = monitor_.lastCycleAtMs();
   const bool newCycle = cycle != lastCycleSeenMs_;
 
@@ -176,12 +331,20 @@ void TftDashboard::update() {
   }
 }
 
-void TftDashboard::drawSplash() {
+void TftDashboard::drawSplash(const String& wifiSsid) {
   tft_.setTextDatum(MC_DATUM);
   tft_.setTextColor(kAccent, kBg);
-  tft_.drawString("VPS MONITOR", kScreenW / 2, kScreenH / 2 - 18, 4);
+  tft_.drawString("VPS MONITOR", kScreenW / 2, kScreenH / 2 - 40, 4);
+
+  // Tell the user which network the device is about to join; the panel stays
+  // on this screen until the first dashboard render.
+  const String label = "Wi-Fi: " + wifiSsid;
+  tft_.setTextColor(kText, kBg);
+  tft_.drawString(ellipsize(tft_, label, 2, kScreenW - 20), kScreenW / 2,
+                  kScreenH / 2 + 6, 2);
+
   tft_.setTextColor(kMuted, kBg);
-  tft_.drawString("starting...", kScreenW / 2, kScreenH / 2 + 18, 2);
+  tft_.drawString("connecting...", kScreenW / 2, kScreenH / 2 + 32, 1);
 }
 
 void TftDashboard::renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots,
@@ -478,12 +641,342 @@ String TftDashboard::footerText() const {
   return text + " | " + String(ageSec / 3600) + " h ago";
 }
 
+bool TftDashboard::touchPressedSignal(uint16_t z) const {
+  if (z >= VPSPANEL_TOUCH_Z_THRESHOLD) return true;
+
+#if VPSPANEL_TOUCH_IRQ >= 0
+  // PENIRQ only says "the panel is being touched"; the position still comes
+  // from the SPI read. It is used as a second opinion so a marginal pressure
+  // reading does not swallow the press.
+  return digitalRead(VPSPANEL_TOUCH_IRQ) == LOW;
+#else
+  return false;
+#endif
+}
+
+// Second, independent attempt at reading the controller, driven through the
+// Arduino SPI driver instead of TFT_eSPI's register-level touch helpers. It is
+// only used when a touch is definitely happening (PENIRQ is low) but the
+// library's sample was unusable, so it costs nothing in the normal case.
+bool TftDashboard::readTouchDirect(uint16_t& rawX, uint16_t& rawY) {
+  SPIClass& spi = TFT_eSPI::getSPIinstance();
+
+  spi.beginTransaction(SPISettings(SPI_TOUCH_FREQUENCY, MSBFIRST, SPI_MODE0));
+  digitalWrite(VPSPANEL_TOUCH_CS, LOW);
+
+  // Two conversions per axis: the first one settles the panel after the
+  // channel switch, the second is the value that is kept.
+  auto readAxis = [&spi](uint8_t command) {
+    spi.transfer(command);
+    (void)spi.transfer16(0);
+    spi.transfer(command);
+    return static_cast<uint16_t>((spi.transfer16(0) >> 3) & 0x0FFF);
+  };
+
+  const uint16_t y = readAxis(0xD0);  // Y position
+  const uint16_t x = readAxis(0x90);  // X position
+
+  digitalWrite(VPSPANEL_TOUCH_CS, HIGH);
+  spi.endTransaction();
+
+  rawX = x;
+  rawY = y;
+  return plausibleRaw(rawX) && plausibleRaw(rawY);
+}
+
+bool TftDashboard::readTouch(uint16_t& x, uint16_t& y) {
+  const uint16_t z = tft_.getTouchRawZ();
+  bool pressed = false;
+  uint16_t rawX = 0;
+  uint16_t rawY = 0;
+  int sx = 0;
+  int sy = 0;
+
+  if (touchPressedSignal(z)) {
+    tft_.getTouchRaw(&rawX, &rawY);
+    bool usable = plausibleRaw(rawX) && plausibleRaw(rawY);
+
+#if VPSPANEL_TOUCH_IRQ >= 0
+    if (!usable) usable = readTouchDirect(rawX, rawY);
+#endif
+
+    pressed = usable;
+
+    if (pressed) {
+      const uint16_t x0 = touchCal_[0];
+      const uint16_t xSpan = touchCal_[1];
+      const uint16_t y0 = touchCal_[2];
+      const uint16_t ySpan = touchCal_[3];
+      const uint8_t flags = static_cast<uint8_t>(touchCal_[4]);
+
+      // Same axis convention as TFT_eSPI::convertRawXY, but clamped: with a
+      // rough calibration the library rejects out-of-range coordinates, which
+      // makes the whole screen appear dead instead of merely inaccurate.
+      if (flags & 0x01) {  // touch axes swapped relative to the display axes
+        sx = mapTouchAxis(rawY, x0, xSpan, kScreenW);
+        sy = mapTouchAxis(rawX, y0, ySpan, kScreenH);
+      } else {
+        sx = mapTouchAxis(rawX, x0, xSpan, kScreenW);
+        sy = mapTouchAxis(rawY, y0, ySpan, kScreenH);
+      }
+      if (flags & 0x02) sx = kScreenW - 1 - sx;
+      if (flags & 0x04) sy = kScreenH - 1 - sy;
+
+      x = static_cast<uint16_t>(sx);
+      y = static_cast<uint16_t>(sy);
+    }
+  }
+
+#if VPSPANEL_TOUCH_DEBUG
+  const uint32_t now = millis();
+  if (pressed != touchDebugPressed_ || (now - lastTouchDebugMs_) >= 1000) {
+    lastTouchDebugMs_ = now;
+    touchDebugPressed_ = pressed;
+#if VPSPANEL_TOUCH_IRQ >= 0
+    const int irqLevel = digitalRead(VPSPANEL_TOUCH_IRQ);
+#else
+    const int irqLevel = -1;
+#endif
+    Serial.printf("Touch: z=%u irq=%d raw=%u,%u -> %u,%u pressed=%d\n", z, irqLevel,
+                  rawX, rawY, x, y, pressed ? 1 : 0);
+  }
+#endif
+
+  return pressed;
+}
+
+void TftDashboard::handleTouch() {
+  uint16_t x = 0;
+  uint16_t y = 0;
+  const bool pressed = readTouch(x, y);
+
+  // Only react to state changes so holding a finger down does not repeatedly
+  // open/close the detail screen.
+  if (pressed == touchDown_) return;
+  touchDown_ = pressed;
+  if (!pressed) return;
+
+  // Ignore contact bounce: a press is only accepted after a short quiet
+  // period, so one physical tap cannot open and immediately close the detail
+  // screen.
+  const uint32_t now = millis();
+  if ((now - lastTouchMs_) < 250) return;
+  lastTouchMs_ = now;
+
+  if (view_ == View::Detail) {
+    closeDetail();
+    return;
+  }
+
+  // The coordinates refer to what is currently visible, i.e. the page that was
+  // last rendered, so use the current page_ index as-is.
+  const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+  const size_t first = page_ * kServersPerPage;
+  for (size_t slot = 0; slot < kServersPerPage; ++slot) {
+    const size_t index = first + slot;
+    if (index >= snapshots.size()) break;
+
+    const int left = kCardX;
+    const int top = cardY(slot);
+    if (x >= left && x < left + kCardW && y >= top && y < top + kCardH) {
+      openDetail(snapshots[index].server.id);
+      return;
+    }
+  }
+}
+
+void TftDashboard::openDetail(const String& serverId) {
+  view_ = View::Detail;
+  detailId_ = serverId;
+  resetDetail();
+  detail_.frameDrawn = false;
+  lastPageMs_ = millis();
+}
+
+void TftDashboard::closeDetail() {
+  view_ = View::Dashboard;
+  detailId_ = "";
+  resetDetail();
+  invalidateDashboard();
+}
+
+void TftDashboard::resetDetail() {
+  detail_ = DetailCache{};
+}
+
+void TftDashboard::invalidateDashboard() {
+  chromeDrawn_ = false;
+  emptyDrawn_ = false;
+  headerRight_ = TextField{};
+  footerLeft_ = TextField{};
+  footerPage_ = TextField{};
+  emptyUrl_ = TextField{};
+  for (auto& card : cards_) card = CardCache{};
+  hasRendered_ = false;
+  lastPageMs_ = millis();
+}
+
+void TftDashboard::drawDetailFrame() {
+  tft_.fillScreen(kPanel);
+  tft_.fillRect(0, 0, kScreenW, kDetailHeaderH, kBg);
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.setTextColor(kAccent, kBg);
+  tft_.drawString("SERVER DETAIL", 8, 5, 2);
+
+  tft_.setTextDatum(TR_DATUM);
+  tft_.setTextColor(kMuted, kBg);
+  tft_.drawString("tap to return", kScreenW - 8, 8, 1);
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.drawFastHLine(10, kDetailDivider1Y, kScreenW - 20, kLine);
+  tft_.drawFastHLine(10, kDetailDivider2Y, kScreenW - 20, kLine);
+
+  tft_.setTextColor(kMuted, kPanel);
+  tft_.drawString("LOAD 1m", 10, 88, 1);
+  tft_.drawString("TEMP C", 250, 88, 1);
+  tft_.drawString("MEMORY", 10, 136, 1);
+  tft_.drawString("LAST POLL", 10, 182, 1);
+  tft_.drawString("TOOK", 205, 182, 1);
+}
+
+void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
+  const ServerConfig& server = snapshot.server;
+  const ServerMetrics& metrics = snapshot.metrics;
+
+  tft_.startWrite();
+
+  // ---- identity ----------------------------------------------------------
+  const String name = ellipsize(tft_, server.displayName(), 4, 185);
+  drawField(detail_.name, name, 10, 34, 4, kText, 200);
+
+  uint16_t chipColor = kMuted;
+  const char* chip = "WAIT";
+  if (!server.enabled) {
+    chip = "PAUSED";
+  } else if (metrics.ok) {
+    chipColor = kOk;
+    chip = "OK";
+  } else if (metrics.valid) {
+    chipColor = kErr;
+    chip = "ERROR";
+  }
+  drawRightField(detail_.chip, chip, kScreenW - 10, 40, 205, 107, 2, chipColor);
+
+  String endpoint = server.user.length() > 0 ? server.user + "@" + server.endpoint()
+                                             : server.endpoint();
+  endpoint = ellipsize(tft_, endpoint, 1, kScreenW - 20);
+  drawField(detail_.endpoint, endpoint, 10, 64, 1, kMuted, kScreenW - 10);
+
+  // ---- load --------------------------------------------------------------
+  String loadText;
+  if (isnan(metrics.load1)) {
+    loadText = "n/a";
+  } else {
+    loadText = metrics.load1 < 10 ? String(metrics.load1, 2) : String(metrics.load1, 1);
+  }
+  drawField(detail_.load, loadText, 10, 96, 4, kAccent, 230);
+
+  // ---- temperature -------------------------------------------------------
+  if (!isnan(metrics.tempC)) {
+    const uint16_t color =
+        metrics.tempC >= 80 ? kErr : (metrics.tempC >= 70 ? kWarn : kText);
+    drawRightField(detail_.temp,
+                   String(static_cast<int>(lroundf(metrics.tempC))) + " C", kScreenW - 10,
+                   96, 240, 72, 4, color);
+  } else {
+    drawRightField(detail_.temp, "n/a", kScreenW - 10, 96, 240, 72, 4, kMuted);
+  }
+
+  // ---- memory ------------------------------------------------------------
+  if (!isnan(metrics.memUsedMb) && !isnan(metrics.memTotalMb) && metrics.memTotalMb > 0) {
+    const float percent = 100.0f * metrics.memUsedMb / metrics.memTotalMb;
+    const String memory =
+        String(static_cast<int>(lroundf(metrics.memUsedMb))) + "/" +
+        String(static_cast<int>(lroundf(metrics.memTotalMb))) + " MB (" +
+        String(static_cast<int>(lroundf(percent))) + "%)";
+    drawField(detail_.mem, memory, 10, 146, 2, kText, kScreenW - 10);
+
+    int filled = static_cast<int>(kDetailBarW * percent / 100.0f + 0.5f);
+    filled = filled < 0 ? 0 : (filled > kDetailBarW ? kDetailBarW : filled);
+    const uint16_t color = percent >= 90 ? kErr : kAccent;
+    if (filled != detail_.barFilled || color != detail_.barColor) {
+      drawBar(tft_, kDetailBarX, kDetailBarY, kDetailBarW, kDetailBarH, percent, color);
+      detail_.barFilled = filled;
+      detail_.barColor = color;
+    }
+  } else {
+    drawField(detail_.mem, "n/a", 10, 146, 2, kMuted, kScreenW - 10);
+    if (detail_.barFilled >= 0) {
+      tft_.fillRect(kDetailBarX, kDetailBarY, kDetailBarW, kDetailBarH, kPanel);
+      detail_.barFilled = -1;
+      detail_.barColor = 0;
+    }
+  }
+
+  // ---- poll age / duration ----------------------------------------------
+  String ageText = "--";
+  if (metrics.polledAtMs != 0) {
+    const uint32_t ageSec = (millis() - metrics.polledAtMs) / 1000;
+    if (ageSec < 60) {
+      ageText = String(ageSec) + "s ago";
+    } else if (ageSec < 3600) {
+      ageText = String(ageSec / 60) + " min ago";
+    } else {
+      ageText = String(ageSec / 3600) + " h ago";
+    }
+  }
+  drawField(detail_.age, ageText, 80, 182, 1, kMuted, 200);
+
+  String tookText = "--";
+  if (metrics.valid) {
+    tookText = metrics.durationMs < 1000 ? String(metrics.durationMs) + " ms"
+                                         : String(metrics.durationMs / 1000.0f, 1) + " s";
+  }
+  drawField(detail_.took, tookText, 240, 182, 1, kMuted, kScreenW - 10);
+
+  // ---- waiting / error note ---------------------------------------------
+  uint8_t noteKind = 0;
+  String noteText;
+  if (!server.enabled) {
+    noteKind = 1;
+    noteText = "polling is paused";
+  } else if (!metrics.valid) {
+    noteKind = 1;
+    noteText = "waiting for first poll...";
+  } else if (!metrics.ok) {
+    noteKind = 2;
+    noteText = metrics.error;
+  }
+
+  if (noteKind != detail_.noteKind || detail_.note.text != noteText || !detail_.note.valid) {
+    tft_.fillRect(10, kDetailNoteY - 2, kScreenW - 20, kScreenH - kDetailNoteY, kPanel);
+    detail_.noteKind = noteKind;
+    detail_.note.text = noteText;
+    detail_.note.color = noteKind == 2 ? kErr : kMuted;
+    detail_.note.valid = true;
+
+    if (noteKind == 2) {
+      drawWrapped(tft_, noteText, 10, kDetailNoteY, kScreenW - 10, 2, kErr, kPanel);
+    } else if (noteKind == 1) {
+      tft_.setTextDatum(TL_DATUM);
+      tft_.setTextColor(kMuted, kPanel);
+      tft_.drawString(noteText, 10, kDetailNoteY, 1);
+    }
+  }
+
+  tft_.endWrite();
+}
+
 #else  // !VPSPANEL_HAS_DISPLAY
 
-TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry)
-    : monitor_(monitor), registry_(registry) {}
+TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry,
+                           TouchCalibrationStore& touchCalibration)
+    : monitor_(monitor), registry_(registry) {
+  (void)touchCalibration;
+}
 
-void TftDashboard::begin() {}
+void TftDashboard::begin(const String& wifiSsid) { (void)wifiSsid; }
 
 void TftDashboard::update() {}
 
