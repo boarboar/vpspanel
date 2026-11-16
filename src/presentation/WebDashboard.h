@@ -15,6 +15,11 @@ class WebDashboard {
   void begin();
   void handle();
 
+  // Stop/restart listening without re-registering the HTTP handlers. Used
+  // while the display's Wi-Fi setup screen has the network switched off.
+  void suspend();
+  void resume();
+
  private:
   void handleDashboard();
   void handleServersPage();

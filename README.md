@@ -21,6 +21,9 @@ serial console, and on an optional ILI9341 TFT panel.
 - Serial console keeps printing poll results, so headless use still works.
 - Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: two server cards per page,
   automatic paging, Wi-Fi/IP status and poll age. The display can be compiled out.
+- Three buttons (**A/B/C**) on the TFT build: select a card, open its detail
+  screen, return to the dashboard, and open a placeholder Wi-Fi setup screen
+  from the boot splash.
 
 ## Setup
 
@@ -81,16 +84,51 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
   values refresh every 2 s (or immediately when a new poll cycle completes).
 - The panel is initialised before the Wi-Fi association and shows a splash
   screen with the SSID it is about to join, so it is never blank during boot.
-- Touching a server card opens a full-screen detail view (state, user@host:port,
-  load, memory with bar, CPU temperature, poll age/duration and the SSH error
-  text when a poll failed). Touching anywhere on that screen returns to the
-  dashboard.
+- A full-screen per-server detail view (state, user@host:port, load, memory with
+  bar, CPU temperature, poll age/duration and the SSH error text when a poll
+  failed) is opened from Selection mode with button C.
 
-The touch controller is an XPT2046 that shares the display SPI bus. The display
-task samples it every 20 ms, because a tap only lasts around 100 ms and a slower
-loop misses most presses. A press is recognised from the controller's pressure
-reading (`Z`) or, as a second opinion, from the `T_IRQ` line; no extra task or
-GPIO interrupt is needed.
+### Buttons
+
+Three momentary buttons connect between the GPIO and GND (the internal
+pull-ups are enabled):
+
+| Button | ESP32-C3 | Function                                                    |
+| ------ | -------- | ----------------------------------------------------------- |
+| A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card |
+| B      | GPIO 1   | Selection mode: next card; setup screen: move selection      |
+| C      | GPIO 2   | Enter Selection mode / open details / back / activate button |
+| common | GND      |                                                             |
+
+The boot splash shows `press A to setup WiFi`. Pressing **A** there opens a
+placeholder Wi-Fi setup screen with two on-screen buttons, **OK** and
+**Cancel**. **A/B** move the highlighted button and **C** activates it. Both
+buttons currently just close the screen and return to the splash; no Wi-Fi
+settings are changed yet. The splash stays up while the boot-time Wi-Fi
+association runs, and for two seconds after leaving the setup screen.
+
+While the setup screen is open, Wi-Fi is powered down, mDNS and the web server
+listener are stopped, and no new SSH poll is started. Leaving the screen
+reconnects Wi-Fi (restoring mDNS and the web server once an IP address is
+available) and polling resumes on the next cycle.
+
+Behaviour:
+
+- A short press of **C** on the dashboard enters Selection mode. The selected
+  card gets a highlighted border and automatic paging stops.
+- In Selection mode **A** and **B** move the selection to the previous/next
+  card. Selection wraps around and follows across page boundaries.
+- **C** opens the detail screen of the selected card. **C** there returns to
+  the dashboard with the card still selected.
+- 30 seconds without a button press leaves Selection mode and resumes automatic
+  paging. The timeout is `VPSPANEL_SELECTION_TIMEOUT_MS` in
+  `src/config/input_config.h`; the pins and the active level live there too.
+
+The module's XPT2046 touch controller is not used. The chip does answer on SPI,
+but a resistive panel needs its four analog lines (`X+ X- Y+ Y-`) connected to
+the controller, and on this module that connection is open: all four touch
+channels read floating values and `T_IRQ` never asserts even while pressing.
+Consequently `T_CS` and `T_IRQ` do not have to be wired.
 
 ### Wiring
 
@@ -101,20 +139,13 @@ GPIO interrupt is needed.
 | CS             | GPIO 7   |                                        |
 | RESET          | GPIO 10  |                                        |
 | DC             | GPIO 3   |                                        |
-| MOSI           | GPIO 6   | shared with T_DIN                      |
-| SCK            | GPIO 4   | shared with T_CLK                      |
-| MISO           | GPIO 5   | shared with T_DO                       |
+| MOSI           | GPIO 6   |                                        |
+| SCK            | GPIO 4   |                                        |
+| MISO           | GPIO 5   |                                        |
 | LED            | 3V3      | see backlight note below               |
 
-Touch controller (same module):
-
-| XPT2046 | ESP32-C3 | Note                                  |
-| ------- | -------- | ------------------------------------- |
-| T_CLK   | GPIO 4   | same SPI clock as the display         |
-| T_DIN   | GPIO 6   | same SPI MOSI                        |
-| T_DO    | GPIO 5   | same SPI MISO                        |
-| T_CS    | GPIO 1   | `-DTOUCH_CS=1` in `platformio.ini`    |
-| T_IRQ   | GPIO 0   | active low, input with pull-up         |
+The touch pins of the module (`T_CLK`, `T_CS`, `T_DIN`, `T_DO`, `T_IRQ`) are
+left unconnected — see the note above.
 
 These are the defaults in `src/config/display_config.h`, mirrored by the `-DTFT_*`
 flags in `platformio.ini`; change both to match your board. Avoid GPIO 2, 8 and 9
@@ -125,21 +156,17 @@ flags in `platformio.ini`; change both to match your board. Avoid GPIO 2, 8 and 
 - `src/config/display_config.h` — feature flag, wiring documentation, rotation
   and backlight defaults.
   - `VPSPANEL_HAS_DISPLAY` — set to `0` to build the firmware without the
-    display (no display task is started and the TFT rendering code is not
-    compiled in).
+    display and buttons (no display task is started, so the TFT is not drawn
+    and the buttons are not read).
   - `VPSPANEL_TFT_*` — the pin values TFT_eSPI must use,
     `VPSPANEL_TFT_ROTATION` (`1` or `3`; use `3` if the image is upside down),
     and `VPSPANEL_TFT_BL` / `VPSPANEL_TFT_BACKLIGHT_ON`.
-  - `VPSPANEL_TOUCH_CS` / `VPSPANEL_TOUCH_IRQ` — XPT2046 chip select and
-    interrupt pins (`T_IRQ` is optional; set it to `-1` when it is not wired).
-  - `VPSPANEL_TOUCH_CAL_*` — fallback touch calibration used until the panel
-    has been calibrated (calibration is offered on every boot).
-  - `VPSPANEL_TOUCH_Z_THRESHOLD` — pressure above which a touch is accepted.
-  - `VPSPANEL_TOUCH_DEBUG` — set to `1` to print every touch sample on the
-    serial console.
-- `platformio.ini` — the matching `-DTFT_*` / `-DTOUCH_CS` /
-  `-DUSER_SETUP_LOADED` build flags that configure the **TFT_eSPI library
-  itself** (driver, 240x320 size, pins, 40 MHz SPI, fonts 1/2/4, touch CS).
+- `src/config/input_config.h` — button pins (`VPSPANEL_BUTTON_A_PIN`,
+  `VPSPANEL_BUTTON_B_PIN`, `VPSPANEL_BUTTON_C_PIN`,
+  `VPSPANEL_BUTTON_ACTIVE_LOW`) and the Selection-mode timeout.
+- `platformio.ini` — the matching `-DTFT_*` / `-DUSER_SETUP_LOADED` build flags
+  that configure the **TFT_eSPI library
+  itself** (driver, 240x320 size, pins, 40 MHz SPI, fonts 1/2/4).
   TFT_eSPI is compiled as a separate library and does
   not see this project's headers, so these flags are the authoritative setup for
   the driver. `static_assert`s in `TftDashboard.cpp` fail the build if they drift
@@ -164,31 +191,8 @@ source. If colours are inverted (light background instead of dark), add
 `-DTFT_INVERSION_ON=1` to `build_flags` in `platformio.ini`.
 
 The panel is drawn from its own 10 KB FreeRTOS task, so a slow SPI refresh never
-blocks HTTP responses or the SSH poller.
-
-**Touch calibration:** every boot the splash screen shows
-`hold screen to calibrate touch`. Keep a finger on the panel for a moment and
-TFT_eSPI draws the four calibration crosses; the resulting values are stored in
-NVS (`vpspanel` / `touchcal`) and reused on later boots. Ignoring the prompt
-keeps the stored (or fallback) calibration and continues normally after about
-two seconds. A stored calibration that is out of the controller's raw range is
-ignored, so a bad calibration cannot make the whole screen appear dead.
-
-**Touch troubleshooting:** every boot prints one line such as
-
-```
-Touch: idle Z=0 (threshold 200), T_IRQ=1
-```
-
-- `idle Z` stays at `0` when the SPI path to the XPT2046 is not working (wrong
-  `T_CS`, no MISO, controller unpowered). With a finger on the panel it should
-  rise well above the threshold.
-- If idle `Z` is already above the threshold the panel is being seen as
-  permanently pressed: raise `VPSPANEL_TOUCH_Z_THRESHOLD`.
-- `T_IRQ=1` with nothing touching the panel is correct (active low).
-
-Set `VPSPANEL_TOUCH_DEBUG` to `1` for a line per press/release with the raw and
-mapped coordinates.
+blocks HTTP responses or the SSH poller. That task also polls and debounces the
+three buttons.
 
 ## Built-in status LED
 
@@ -222,6 +226,7 @@ src/
 ├── main.cpp                     composition root: wiring, Wi-Fi, tasks
 ├── config/
 │   ├── display_config.h             TFT enable flag, pins, rotation
+│   ├── input_config.h               button pins, active level, selection timeout
 │   ├── led_config.h                 built-in status LED pin / polarity
 │   ├── wifi_credentials.example.h   template (committed)
 │   └── wifi_credentials.h           real credentials (git-ignored)
@@ -237,8 +242,8 @@ src/
 ├── infra/                       concrete adapters for the outside world
 │   ├── NvsServerStore.{h,cpp}   JSON config in the NVS flash partition
 │   ├── SshMetricsProvider.{h,cpp}  LibSSH-ESP32 implementation
-│   ├── StatusLed.{h,cpp}        built-in LED: Wi-Fi + polling feedback
-│   └── TouchCalibrationStore.{h,cpp}  XPT2046 calibration in NVS
+│   ├── ButtonInput.{h,cpp}      debounced A/B/C button presses
+│   └── StatusLed.{h,cpp}        built-in LED: Wi-Fi + polling feedback
 └── presentation/                output only, talks to the domain services
     ├── ConsoleView.{h,cpp}      serial output (MonitorService listener)
     ├── WebDashboard.{h,cpp}     HTTP routes, forms, JSON API
@@ -265,9 +270,9 @@ different presentation (MQTT, display, etc.) only needs to observe
 - **Polling task** — dedicated 40 KB stack for libssh/mbedTLS. It calls
   `libssh_begin()` once and then polls when `MonitorService::pollDue()` says so.
 - **Display task** — 10 KB stack (only when `VPSPANEL_HAS_DISPLAY = 1`). It
-  redraws the TFT at its own pace, samples the touch controller every 20 ms so
-  short taps are not lost, and never touches the network. The panel is
-  initialised from `setup()` before Wi-Fi, then handed over to this task.
+  redraws the TFT at its own pace, polls the A/B/C buttons and never touches the
+  network. The panel is initialised from `setup()` before Wi-Fi, then handed
+  over to this task.
 - **Status LED** — no task of its own: non-blocking `StatusLed::update()` calls
   from the loop task and the boot-time Wi-Fi connect loop drive the blink.
 - Shared state (`ServerRegistry`, latest metrics) is protected by FreeRTOS
@@ -331,6 +336,8 @@ Free heap: 245000 bytes
 - The remote command is a single line in
   `src/infra/SshMetricsProvider.cpp`; extend the parser in
   `src/domain/MetricsParser.cpp` if you add metrics.
-- Display refresh (2 s), paging interval (7 s) and servers per page are constants
-  at the top of `src/presentation/TftDashboard.cpp`. The display task stack is
-  set in `src/main.cpp` (10 KB).
+- Display refresh (1 s), paging interval (7 s), button polling (10 ms), button
+  press lockout (30 ms) and servers per page are constants in
+  `src/presentation/TftDashboard.cpp` / `src/infra/ButtonInput.h`; the
+  Selection-mode timeout is in `src/config/input_config.h`. The display task
+  stack is set in `src/main.cpp` (10 KB).

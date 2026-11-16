@@ -16,7 +16,6 @@
 #include "infra/NvsServerStore.h"
 #include "infra/SshMetricsProvider.h"
 #include "infra/StatusLed.h"
-#include "infra/TouchCalibrationStore.h"
 #include "presentation/ConsoleView.h"
 #include "presentation/TftDashboard.h"
 #include "presentation/WebDashboard.h"
@@ -43,14 +42,16 @@ SshMetricsProvider metricsProvider;
 MonitorService monitor(registry, metricsProvider);
 ConsoleView consoleView;
 WebDashboard webDashboard(registry, monitor);
-TouchCalibrationStore touchCalibration;
-TftDashboard tftDashboard(monitor, registry, touchCalibration);
+TftDashboard tftDashboard(monitor, registry);
 StatusLed statusLed;
 
 TaskHandle_t pollTaskHandle = nullptr;
 uint32_t lastWifiAttemptMs = 0;
 bool wifiWasConnected = false;
 bool mdnsStarted = false;
+bool webDashboardStarted = false;
+bool webServerRestartPending = false;
+bool networkSuspended = false;
 
 void startMdns() {
   if (mdnsStarted) return;
@@ -59,6 +60,52 @@ void startMdns() {
     MDNS.addService("http", "tcp", 80);
   }
   consoleView.printMdns(mdnsStarted);
+}
+
+void beginWifiStation() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(WIFI_HOSTNAME);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lastWifiAttemptMs = millis();
+}
+
+// The Wi-Fi setup screen needs the radio quiet: both the boot-time association
+// attempt and SSH polling otherwise compete with the display task while the
+// user is trying to navigate. Everything is restored as soon as the screen
+// closes.
+void suspendNetworkForSetup() {
+  if (networkSuspended) return;
+  networkSuspended = true;
+
+  Serial.println(F("Setup: network suspended"));
+  if (mdnsStarted) {
+    MDNS.end();
+    mdnsStarted = false;
+  }
+  if (webDashboardStarted) {
+    webDashboard.suspend();
+    webServerRestartPending = true;
+  }
+  WiFi.disconnect(true);  // also powers the radio down
+  WiFi.mode(WIFI_OFF);
+  wifiWasConnected = false;
+}
+
+void resumeNetworkAfterSetup() {
+  if (!networkSuspended) return;
+  networkSuspended = false;
+
+  Serial.println(F("Setup: reconnecting Wi-Fi"));
+  beginWifiStation();
+  wifiWasConnected = false;
+}
+
+void maintainSetupNetwork() {
+  if (tftDashboard.isSetupOpen()) {
+    suspendNetworkForSetup();
+  } else {
+    resumeNetworkAfterSetup();
+  }
 }
 
 void connectWifiDuringBoot() {
@@ -72,12 +119,23 @@ void connectWifiDuringBoot() {
   const uint32_t started = millis();
   uint32_t lastDotMs = started;
   while (WiFi.status() != WL_CONNECTED && (millis() - started) < kWifiConnectTimeoutMs) {
+    maintainSetupNetwork();
+
+    const bool setupOpen = tftDashboard.isSetupOpen();
+    statusLed.setWifiConnecting(!setupOpen);
     statusLed.update();
-    if ((millis() - lastDotMs) >= 250) {
+
+#if VPSPANEL_HAS_DISPLAY
+    // The display task has not started yet; keep servicing the splash screen
+    // so A can open the Wi-Fi setup while the station associates.
+    tftDashboard.update();
+#endif
+
+    if (!setupOpen && (millis() - lastDotMs) >= 250) {
       lastDotMs = millis();
       Serial.print('.');
     }
-    delay(20);
+    delay(10);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -96,6 +154,12 @@ void maintainWifi() {
 
   if (connected) {
     if (!wifiWasConnected) {
+      if (webServerRestartPending) {
+        // The listening socket was closed when the setup screen suspended the
+        // network; reopen it now that an IP address is available again.
+        webDashboard.resume();
+        webServerRestartPending = false;
+      }
       consoleView.printWifiConnected(WiFi.localIP().toString());
       startMdns();
       wifiWasConnected = true;
@@ -122,8 +186,12 @@ void pollTask(void*) {
   libssh_begin();
 
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED && monitor.pollDue()) {
-      monitor.pollAll();
+    // Do not start a new poll while the user is in the Wi-Fi setup screen: the
+    // SSH connection would compete with the display for the radio/CPU.
+    if (!tftDashboard.isSetupOpen()) {
+      if (WiFi.status() == WL_CONNECTED && monitor.pollDue()) {
+        monitor.pollAll();
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(200));
   }
@@ -135,14 +203,15 @@ void pollTask(void*) {
 // setup(), before Wi-Fi, so the splash screen is visible while the station
 // associates; this task only replaces it with the dashboard.
 //
-// The loop runs fast because the same task also samples the touch controller.
-// A tap only lasts ~100 ms, so a slow loop (it used to be 250 ms) misses most
-// presses entirely. update() is cheap when nothing changed: the redraws
-// themselves are throttled internally.
+// update() throttles its own redraws internally (1 s for the dashboard), so
+// the loop only needs to be fast enough to notice a new poll cycle and a
+// button press promptly.
 void displayTask(void*) {
   for (;;) {
     tftDashboard.update();
-    vTaskDelay(pdMS_TO_TICKS(20));
+    // 10 ms keeps even very short button taps from falling between two polls;
+    // the renderer itself still throttles SPI traffic to once per second.
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 #endif
@@ -174,9 +243,19 @@ void setup() {
   connectWifiDuringBoot();
 
   webDashboard.begin();
+  webDashboardStarted = true;
   consoleView.printFreeHeap();
 
 #if VPSPANEL_HAS_DISPLAY
+  // The setup screen may still be open from the splash; its network suspension
+  // closed no server yet, but the listener started while Wi-Fi was off, so ask
+  // maintainWifi() to reopen it after the radio comes back.
+  if (tftDashboard.isSetupOpen()) webServerRestartPending = true;
+
+  // Let the splash screen hand over to the dashboard once the boot-time Wi-Fi
+  // attempt is over. The display task takes over button polling from here.
+  tftDashboard.finishBoot();
+
   if (xTaskCreate(displayTask, "display", 10 * 1024, nullptr, 1, nullptr) != pdPASS) {
     Serial.println(F("display: could not start task"));
   } else {
@@ -191,11 +270,16 @@ void setup() {
 }
 
 void loop() {
-  webDashboard.handle();
-  maintainWifi();
+  maintainSetupNetwork();
 
-  statusLed.setWifiConnecting(WiFi.status() != WL_CONNECTED);
-  statusLed.setPolling(monitor.isPolling());
+  const bool setupOpen = tftDashboard.isSetupOpen();
+  if (!setupOpen) {
+    webDashboard.handle();
+    maintainWifi();
+  }
+
+  statusLed.setWifiConnecting(!setupOpen && WiFi.status() != WL_CONNECTED);
+  statusLed.setPolling(!setupOpen && monitor.isPolling());
   statusLed.update();
 
   delay(2);

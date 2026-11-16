@@ -104,6 +104,14 @@ void WebDashboard::handle() {
   server_.handleClient();
 }
 
+void WebDashboard::suspend() {
+  server_.stop();
+}
+
+void WebDashboard::resume() {
+  server_.begin();
+}
+
 String WebDashboard::renderPage(const String& title, const String& activeNav,
                                 const String& content) const {
   String html;
