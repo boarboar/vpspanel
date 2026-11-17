@@ -16,14 +16,15 @@ serial console, and on an optional ILI9341 TFT panel.
 - Server list and polling settings are managed at `http://<device-ip>/servers`.
 - All configuration is stored in the ESP32 **NVS flash partition**; it survives
   reboots and firmware updates.
-- Wi-Fi credentials live in `src/config/wifi_credentials.h`, which is
-  **git-ignored**.
+- Wi-Fi credentials default to `src/config/wifi_credentials.h` (which is
+  **git-ignored**) and can be entered on the TFT setup screen, where they are
+  saved to NVS.
 - Serial console keeps printing poll results, so headless use still works.
 - Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: two server cards per page,
   automatic paging, Wi-Fi/IP status and poll age. The display can be compiled out.
 - Three buttons (**A/B/C**) on the TFT build: select a card, open its detail
-  screen, return to the dashboard, and open a placeholder Wi-Fi setup screen
-  from the boot splash.
+  screen, return to the dashboard, and enter Wi-Fi credentials with an on-screen
+  keyboard from the boot splash.
 
 ## Setup
 
@@ -40,6 +41,10 @@ serial console, and on an optional ILI9341 TFT panel.
    #define WIFI_PASSWORD "your-wifi-password"
    #define WIFI_HOSTNAME "vpspanel"
    ```
+
+   These are the fallback credentials. On a TFT build you can also press **A**
+   on the boot splash and enter the credentials on screen; they are then saved
+   in NVS and used instead of the header values.
 
 3. Build and upload:
 
@@ -93,19 +98,38 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 Three momentary buttons connect between the GPIO and GND (the internal
 pull-ups are enabled):
 
-| Button | ESP32-C3 | Function                                                    |
-| ------ | -------- | ----------------------------------------------------------- |
-| A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card |
-| B      | GPIO 1   | Selection mode: next card; setup screen: move selection      |
-| C      | GPIO 2   | Enter Selection mode / open details / back / activate button |
-| common | GND      |                                                             |
+| Button | ESP32-C3 | Function                                                     |
+| ------ | -------- | ------------------------------------------------------------ |
+| A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card; setup screen: previous key |
+| B      | GPIO 1   | Selection mode: next card; setup screen: next key             |
+| C      | GPIO 2   | Enter Selection mode / open details / back / press setup key |
+| common | GND      |                                                              |
 
-The boot splash shows `press A to setup WiFi`. Pressing **A** there opens a
-placeholder Wi-Fi setup screen with two on-screen buttons, **OK** and
-**Cancel**. **A/B** move the highlighted button and **C** activates it. Both
-buttons currently just close the screen and return to the splash; no Wi-Fi
-settings are changed yet. The splash stays up while the boot-time Wi-Fi
-association runs, and for two seconds after leaving the setup screen.
+The boot splash shows `press A to setup WiFi`. Pressing **A** there opens the
+Wi-Fi setup screen. **A/B** move the highlight across the virtual keyboard and
+**C** presses the highlighted key. The keyboard has lowercase, uppercase and
+symbol pages (the `abc` action cycles them) and these action keys:
+
+| Key   | Action                                                        |
+| ----- | ------------------------------------------------------------- |
+| `Fld` | Switch between the SSID and password fields                   |
+| `abc` | Cycle lowercase / uppercase / symbols                         |
+| `Spc` | Insert a space                                                |
+| `Del` | Delete the last character of the active field                 |
+| `Clr` | Clear the active field                                        |
+| `OK`  | Save the credentials to NVS and reconnect Wi-Fi               |
+| `Esc` | Leave the screen without changing anything                    |
+
+Both fields are prefilled with the credentials currently in use. A valid SSID
+is required; a non-empty password must have at least 8 characters. The password
+is shown in clear text while editing so it can be verified with three buttons.
+After **OK** the credentials are stored in the ESP32 NVS partition, so they
+survive reboots without reflashing. The values in
+`src/config/wifi_credentials.h` are only the fallback used when NVS has no saved
+credentials.
+
+The splash stays up while the boot-time Wi-Fi association runs, and for two
+seconds after leaving the setup screen.
 
 While the setup screen is open, Wi-Fi is powered down, mDNS and the web server
 listener are stopped, and no new SSH poll is started. Leaving the screen
@@ -241,6 +265,7 @@ src/
 │   └── MonitorService.{h,cpp}   scheduling, polling, latest results
 ├── infra/                       concrete adapters for the outside world
 │   ├── NvsServerStore.{h,cpp}   JSON config in the NVS flash partition
+│   ├── NvsWifiCredentialStore.{h,cpp}  Wi-Fi credentials in NVS
 │   ├── SshMetricsProvider.{h,cpp}  LibSSH-ESP32 implementation
 │   ├── ButtonInput.{h,cpp}      debounced A/B/C button presses
 │   └── StatusLed.{h,cpp}        built-in LED: Wi-Fi + polling feedback
@@ -248,6 +273,8 @@ src/
     ├── ConsoleView.{h,cpp}      serial output (MonitorService listener)
     ├── WebDashboard.{h,cpp}     HTTP routes, forms, JSON API
     ├── TftDashboard.{h,cpp}     ILI9341 dashboard (optional)
+    ├── TftTheme.h               shared TFT palette and panel geometry
+    ├── WifiSetupDialog.{h,cpp}  on-screen Wi-Fi credential keyboard
     └── WebAssets.h              HTML/CSS/JS in flash (PROGMEM)
 include/
 └── tft_c3_regbase_fix.h         TFT_eSPI + IDF 5.x C3 register fix
@@ -302,7 +329,8 @@ Notes:
 This is a LAN tool, not a hardened gateway:
 
 - SSH host keys are **not** verified (`ssh_session_is_known_server` is not used).
-- SSH passwords and the whole configuration are stored **unencrypted** in NVS.
+- SSH passwords and the whole configuration are stored **unencrypted** in NVS,
+  as are the Wi-Fi credentials entered on the setup screen.
 - HTTP (not HTTPS) with no authentication.
 
 Use a dedicated low-privilege SSH account with a command-restricted key/password,
@@ -339,5 +367,6 @@ Free heap: 245000 bytes
 - Display refresh (1 s), paging interval (7 s), button polling (10 ms), button
   press lockout (30 ms) and servers per page are constants in
   `src/presentation/TftDashboard.cpp` / `src/infra/ButtonInput.h`; the
-  Selection-mode timeout is in `src/config/input_config.h`. The display task
-  stack is set in `src/main.cpp` (10 KB).
+  Selection-mode timeout is in `src/config/input_config.h`, and the setup
+  keyboard layout/pages are in `src/presentation/WifiSetupDialog.cpp`. The
+  display task stack is set in `src/main.cpp` (10 KB).

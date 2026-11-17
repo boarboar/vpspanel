@@ -14,6 +14,7 @@
 #include "domain/MonitorService.h"
 #include "domain/ServerRegistry.h"
 #include "infra/NvsServerStore.h"
+#include "infra/NvsWifiCredentialStore.h"
 #include "infra/SshMetricsProvider.h"
 #include "infra/StatusLed.h"
 #include "presentation/ConsoleView.h"
@@ -37,6 +38,7 @@ constexpr uint32_t kWifiRetryIntervalMs = 15000;
 // Composition root: concrete implementations are chosen here and wired into
 // the domain services.
 NvsServerStore serverStore;
+NvsWifiCredentialStore wifiCredentials;
 ServerRegistry registry(serverStore);
 SshMetricsProvider metricsProvider;
 MonitorService monitor(registry, metricsProvider);
@@ -44,6 +46,11 @@ ConsoleView consoleView;
 WebDashboard webDashboard(registry, monitor);
 TftDashboard tftDashboard(monitor, registry);
 StatusLed statusLed;
+
+// Filled from NVS in setup(); the compile-time values are the fallback for a
+// fresh device or one whose saved credentials were erased.
+String wifiSsid = WIFI_SSID;
+String wifiPassword = WIFI_PASSWORD;
 
 TaskHandle_t pollTaskHandle = nullptr;
 uint32_t lastWifiAttemptMs = 0;
@@ -65,7 +72,7 @@ void startMdns() {
 void beginWifiStation() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(WIFI_HOSTNAME);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   lastWifiAttemptMs = millis();
 }
 
@@ -95,7 +102,21 @@ void resumeNetworkAfterSetup() {
   if (!networkSuspended) return;
   networkSuspended = false;
 
-  Serial.println(F("Setup: reconnecting Wi-Fi"));
+  String ssid;
+  String password;
+  if (tftDashboard.takeWifiCredentials(ssid, password)) {
+    wifiSsid = ssid;
+    wifiPassword = password;
+    if (wifiCredentials.save(wifiSsid, wifiPassword)) {
+      Serial.println(F("Setup: Wi-Fi credentials saved"));
+    } else {
+      Serial.println(F("Setup: could not save Wi-Fi credentials"));
+    }
+    Serial.printf("Setup: reconnecting Wi-Fi to \"%s\"\n", wifiSsid.c_str());
+  } else {
+    Serial.println(F("Setup: reconnecting Wi-Fi"));
+  }
+
   beginWifiStation();
   wifiWasConnected = false;
 }
@@ -112,9 +133,9 @@ void connectWifiDuringBoot() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(WIFI_HOSTNAME);
 
-  consoleView.printWifiConnecting(WIFI_SSID);
+  consoleView.printWifiConnecting(wifiSsid.c_str());
   statusLed.setWifiConnecting(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
 
   const uint32_t started = millis();
   uint32_t lastDotMs = started;
@@ -176,7 +197,7 @@ void maintainWifi() {
   if ((millis() - lastWifiAttemptMs) >= kWifiRetryIntervalMs) {
     lastWifiAttemptMs = millis();
     WiFi.disconnect();
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   }
 }
 
@@ -224,12 +245,16 @@ void setup() {
 
   consoleView.printBanner();
 
+  if (wifiCredentials.load(wifiSsid, wifiPassword)) {
+    Serial.println(F("Wi-Fi: using credentials saved in flash"));
+  }
+
   statusLed.begin();
 
 #if VPSPANEL_HAS_DISPLAY
   // Bring the panel up before touching the network. Initialising it after the
   // Wi-Fi association left the display blank for several seconds.
-  tftDashboard.begin(WIFI_SSID);
+  tftDashboard.begin(wifiSsid, wifiPassword);
   Serial.println(F("Display: splash screen shown"));
 #endif
 

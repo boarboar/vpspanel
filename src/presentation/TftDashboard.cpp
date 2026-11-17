@@ -7,6 +7,7 @@
 #include <WiFi.h>
 
 #include "config/input_config.h"
+#include "presentation/TftTheme.h"
 
 // TFT_eSPI gets its pins from platformio.ini build_flags. These asserts fail
 // the build if those flags drift from src/config/display_config.h, so the
@@ -22,25 +23,6 @@ static_assert(TFT_WIDTH == 240 && TFT_HEIGHT == 320, "Expected a 240x320 ILI9341
 
 namespace {
 
-// Same palette as the web dashboard (RGB565).
-constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
-  return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-}
-
-constexpr uint16_t kBg = rgb565(15, 20, 32);
-constexpr uint16_t kPanel = rgb565(23, 30, 46);
-constexpr uint16_t kPanel2 = rgb565(30, 39, 57);
-constexpr uint16_t kLine = rgb565(42, 53, 80);
-constexpr uint16_t kText = rgb565(231, 236, 245);
-constexpr uint16_t kMuted = rgb565(147, 161, 189);
-constexpr uint16_t kAccent = rgb565(77, 163, 255);
-constexpr uint16_t kOk = rgb565(61, 220, 151);
-constexpr uint16_t kWarn = rgb565(255, 180, 84);
-constexpr uint16_t kErr = rgb565(255, 107, 107);
-constexpr uint16_t kSelected = rgb565(255, 214, 102);  // Selection-mode border
-
-constexpr int kScreenW = 320;
-constexpr int kScreenH = 240;
 constexpr int kHeaderH = 30;
 constexpr int kFooterY = 218;
 
@@ -77,14 +59,6 @@ constexpr int kDetailBarY = 166;
 constexpr int kDetailBarW = 300;
 constexpr int kDetailBarH = 6;
 constexpr int kDetailNoteY = 196;
-
-// Placeholder Wi-Fi setup screen.
-constexpr int kSetupHeaderH = 28;
-constexpr int kSetupButtonY = 146;
-constexpr int kSetupButtonW = 120;
-constexpr int kSetupButtonH = 48;
-constexpr int kSetupOkX = 25;
-constexpr int kSetupCancelX = kScreenW - kSetupOkX - kSetupButtonW;
 
 int cardY(size_t slot) {
   return kCardY0 + static_cast<int>(slot) * (kCardH + kCardGap);
@@ -157,17 +131,18 @@ void drawWrapped(TFT_eSPI& tft, const String& text, int x, int y, int maxX, int 
 }  // namespace
 
 TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry)
-    : tft_(), monitor_(monitor), registry_(registry) {}
+    : tft_(), monitor_(monitor), registry_(registry), setupDialog_(tft_) {}
 
-void TftDashboard::begin(const String& wifiSsid) {
+void TftDashboard::begin(const String& wifiSsid, const String& wifiPassword) {
   tft_.init();
   tft_.setRotation(VPSPANEL_TFT_ROTATION);
 
   buttons_.begin();
 
   wifiSsid_ = wifiSsid;
+  wifiPassword_ = wifiPassword;
   view_ = View::Splash;
-  setupOpen_.store(false);
+  setupDialog_.close();
 
   drawSplash(wifiSsid_);
 
@@ -193,17 +168,10 @@ void TftDashboard::update() {
     exitSelection(now);
   }
 
-  // The setup screen has no live data; redraw it only when its selection
-  // changes.
+  // The setup dialog has no live data; it redraws itself only when its
+  // selection changes.
   if (view_ == View::Setup) {
-    if (!setupFrameDrawn_) {
-      drawSetupScreen();
-      setupFrameDrawn_ = true;
-      setupDrawnSelection_ = setupSelection_;
-    } else if (setupSelection_ != setupDrawnSelection_) {
-      drawSetupButtons();
-      setupDrawnSelection_ = setupSelection_;
-    }
+    setupDialog_.update();
     return;
   }
 
@@ -312,46 +280,6 @@ void TftDashboard::drawSplash(const String& wifiSsid) {
 
   tft_.setTextColor(kAccent, kBg);
   tft_.drawString("press A to setup WiFi", kScreenW / 2, kScreenH - 18, 1);
-}
-
-void TftDashboard::drawSetupScreen() {
-  tft_.fillScreen(kPanel);
-  tft_.fillRect(0, 0, kScreenW, kSetupHeaderH, kBg);
-
-  tft_.setTextDatum(TL_DATUM);
-  tft_.setTextColor(kAccent, kBg);
-  tft_.drawString("WIFI SETUP", 8, 5, 2);
-
-  tft_.setTextDatum(TR_DATUM);
-  tft_.setTextColor(kMuted, kBg);
-  tft_.drawString("A/B: select  C: press", kScreenW - 8, 8, 1);
-
-  tft_.setTextDatum(MC_DATUM);
-  tft_.setTextColor(kText, kPanel);
-  tft_.drawString("Wi-Fi setup placeholder", kScreenW / 2, 70, 2);
-
-  tft_.setTextColor(kMuted, kPanel);
-  tft_.drawString("Network configuration will be added here.", kScreenW / 2, 98, 1);
-
-  drawSetupButtons();
-}
-
-void TftDashboard::drawSetupButtons() {
-  drawSetupButton(kSetupOkX, kSetupButtonY, kSetupButtonW, kSetupButtonH, "OK",
-                  setupSelection_ == 0);
-  drawSetupButton(kSetupCancelX, kSetupButtonY, kSetupButtonW, kSetupButtonH, "Cancel",
-                  setupSelection_ == 1);
-}
-
-void TftDashboard::drawSetupButton(int x, int y, int w, int h, const char* label,
-                                   bool selected) {
-  const uint16_t color = selected ? kSelected : kText;
-  tft_.fillRoundRect(x, y, w, h, 8, kPanel2);
-  tft_.drawRoundRect(x, y, w, h, 8, selected ? kSelected : kLine);
-
-  tft_.setTextDatum(MC_DATUM);
-  tft_.setTextColor(color, kPanel2);
-  tft_.drawString(label, x + w / 2, y + h / 2, 2);
 }
 
 void TftDashboard::renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots,
@@ -671,9 +599,10 @@ void TftDashboard::handleButtons(uint32_t now) {
   }
 
   if (view_ == View::Setup) {
-    if (pressed & ButtonInput::kButtonA) moveSetupSelection(-1);
-    if (pressed & ButtonInput::kButtonB) moveSetupSelection(1);
-    if (pressed & ButtonInput::kButtonC) closeSetup(now);
+    const WifiSetupDialog::Result result = setupDialog_.handleButtons(pressed);
+    if (result != WifiSetupDialog::Result::None) {
+      closeSetup(now, result == WifiSetupDialog::Result::Ok);
+    }
     return;
   }
 
@@ -706,30 +635,23 @@ void TftDashboard::handleButtons(uint32_t now) {
 
 void TftDashboard::openSetup() {
   view_ = View::Setup;
-  setupOpen_.store(true);
-  setupSelection_ = 0;  // default to OK
-  setupFrameDrawn_ = false;
+  setupDialog_.open(wifiSsid_, wifiPassword_);
 }
 
-void TftDashboard::closeSetup(uint32_t now) {
-  // Both OK and Cancel are placeholders for now: report the chosen one and go
-  // back to the splash. The splash then yields to the dashboard when boot is
-  // complete.
-  Serial.println(setupSelection_ == 0 ? F("WiFi setup: OK (placeholder)")
-                                      : F("WiFi setup: Cancel"));
+void TftDashboard::closeSetup(uint32_t now, bool ok) {
+  // OK applies the entered credentials; Cancel keeps the current ones. Either
+  // way the splash is shown again until the boot-time attempt finishes.
+  if (ok) {
+    wifiSsid_ = setupDialog_.ssid();
+    wifiPassword_ = setupDialog_.password();
+  }
 
+  Serial.println(ok ? F("WiFi setup: credentials submitted") : F("WiFi setup: cancelled"));
+
+  setupDialog_.close();
   view_ = View::Splash;
-  setupOpen_.store(false);
-  setupFrameDrawn_ = false;
   splashHoldUntilMs_ = now + kSplashResumeHoldMs;
   drawSplash(wifiSsid_);
-}
-
-void TftDashboard::moveSetupSelection(int delta) {
-  const int count = static_cast<int>(kSetupChoices);
-  int selection = static_cast<int>(setupSelection_) + delta;
-  selection = (selection % count + count) % count;
-  setupSelection_ = static_cast<uint8_t>(selection);
 }
 
 void TftDashboard::enterSelection(uint32_t now) {
@@ -971,10 +893,19 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
 TftDashboard::TftDashboard(MonitorService& monitor, ServerRegistry& registry)
     : monitor_(monitor), registry_(registry) {}
 
-void TftDashboard::begin(const String& wifiSsid) { (void)wifiSsid; }
+void TftDashboard::begin(const String& wifiSsid, const String& wifiPassword) {
+  (void)wifiSsid;
+  (void)wifiPassword;
+}
 
 void TftDashboard::update() {}
 
 void TftDashboard::finishBoot() {}
 
 #endif
+
+bool TftDashboard::isSetupOpen() const { return setupDialog_.isOpen(); }
+
+bool TftDashboard::takeWifiCredentials(String& ssid, String& password) {
+  return setupDialog_.takeAcceptedCredentials(ssid, password);
+}

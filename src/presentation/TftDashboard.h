@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 
-#include <atomic>
 #include <vector>
 
 #include "config/display_config.h"
 #include "domain/MonitorService.h"
 #include "domain/ServerRegistry.h"
+#include "presentation/WifiSetupDialog.h"
 
 #if VPSPANEL_HAS_DISPLAY
 #include <TFT_eSPI.h>
@@ -27,29 +27,33 @@
 // Three buttons drive the screen: C enters Selection mode, A/B move the
 // highlighted card, C opens its details and C returns to the dashboard.
 // Selection mode is left automatically after 30 s without a button press.
-// On the boot splash, A opens a placeholder Wi-Fi setup screen instead.
+// On the boot splash, A opens the Wi-Fi setup dialog instead.
 class TftDashboard {
  public:
   TftDashboard(MonitorService& monitor, ServerRegistry& registry);
 
   // Initialise the panel and show the splash screen. Called from setup()
   // before the Wi-Fi connection is attempted, so the display is never blank
-  // while the station associates.
-  void begin(const String& wifiSsid);
+  // while the station associates. The credentials are the ones currently in
+  // use, prefilled when the setup dialog opens.
+  void begin(const String& wifiSsid, const String& wifiPassword);
   void update();  // cheap poll + incremental redraw; call frequently
 
   // Leaves the boot splash screen. Called once the Wi-Fi association attempt
   // has finished; from then on update() renders the dashboard.
   void finishBoot();
 
-  // True while the placeholder Wi-Fi setup screen is open. The rest of the
-  // firmware suspends Wi-Fi/polling while this is set.
-  bool isSetupOpen() const { return setupOpen_.load(); }
+  // True while the Wi-Fi setup dialog is open. The rest of the firmware
+  // suspends Wi-Fi/polling while this is set.
+  bool isSetupOpen() const;
+
+  // Copies credentials confirmed in the setup dialog, once. Returns false if
+  // the user cancelled and nothing new was submitted.
+  bool takeWifiCredentials(String& ssid, String& password);
 
  private:
 #if VPSPANEL_HAS_DISPLAY
   static constexpr size_t kServersPerPage = 2;
-  static constexpr uint8_t kSetupChoices = 2;  // OK and Cancel
 
   enum class View : uint8_t { Splash, Setup, Dashboard, Detail };
 
@@ -117,9 +121,6 @@ class TftDashboard {
   void drawCardBorder(int x, int y, bool selected);
   void drawEmptyCard();
 
-  void drawSetupScreen();
-  void drawSetupButtons();
-  void drawSetupButton(int x, int y, int w, int h, const char* label, bool selected);
   void drawField(TextField& field, const String& value, int x, int y, uint8_t font,
                  uint16_t color, int clearToX);
   void drawRightField(TextField& field, const String& value, int rightX, int y,
@@ -128,8 +129,7 @@ class TftDashboard {
 
   void handleButtons(uint32_t now);
   void openSetup();
-  void closeSetup(uint32_t now);
-  void moveSetupSelection(int delta);
+  void closeSetup(uint32_t now, bool ok);
   void enterSelection(uint32_t now);
   void moveSelection(int delta, uint32_t now);
   void exitSelection(uint32_t now);
@@ -146,11 +146,9 @@ class TftDashboard {
   View view_ = View::Splash;
   String detailId_;
   String wifiSsid_;
+  String wifiPassword_;
 
   bool bootFinished_ = false;
-  bool setupFrameDrawn_ = false;
-  uint8_t setupSelection_ = 0;
-  uint8_t setupDrawnSelection_ = 0;
   uint32_t splashHoldUntilMs_ = 0;
 
   bool selecting_ = false;
@@ -173,7 +171,7 @@ class TftDashboard {
   MonitorService& monitor_;
   ServerRegistry& registry_;
 
-  std::atomic<bool> setupOpen_{false};
+  WifiSetupDialog setupDialog_;
 
   bool initialized_ = false;
   bool hasRendered_ = false;
