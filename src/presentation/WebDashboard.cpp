@@ -342,9 +342,11 @@ void WebDashboard::handleApiMetrics() {
     obj["ok"] = metrics.ok;
     obj["error"] = metrics.error;
     obj["load"] = metrics.load1;
+    obj["cpu"] = metrics.cpuPercent;
     obj["memUsed"] = metrics.memUsedMb;
     obj["memTotal"] = metrics.memTotalMb;
-    obj["temp"] = metrics.tempC;
+    obj["diskUsed"] = metrics.diskUsedMb;
+    obj["diskTotal"] = metrics.diskTotalMb;
     obj["ageMs"] = metrics.valid ? static_cast<int32_t>(now - metrics.polledAtMs) : -1;
     obj["durationMs"] = metrics.durationMs;
   }

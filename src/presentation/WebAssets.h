@@ -72,7 +72,7 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
 <div class="card">
   <table>
     <thead><tr>
-      <th>Server</th><th>Status</th><th>Load 1m</th><th>Memory</th><th>Temp</th>
+      <th>Server</th><th>Status</th><th>CPU</th><th>Load 1m</th><th>Memory</th><th>Disk /</th>
       <th class="hide-sm">Last poll</th>
     </tr></thead>
     <tbody id="rows"></tbody>
@@ -148,6 +148,17 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     return td;
   }
 
+  function cpuCell(server) {
+    var td = document.createElement('td');
+    if (!isNumber(server.cpu)) {
+      td.textContent = '\u2014';
+      return td;
+    }
+    td.className = 'mono';
+    td.textContent = Math.round(server.cpu) + ' %';
+    return td;
+  }
+
   function memoryCell(server) {
     var td = document.createElement('td');
     if (!isNumber(server.memUsed) || !isNumber(server.memTotal) || server.memTotal <= 0) {
@@ -169,16 +180,29 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     return td;
   }
 
-  function tempCell(server) {
+  function formatSize(mb) {
+    if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+    return Math.round(mb) + ' MB';
+  }
+
+  function diskCell(server) {
     var td = document.createElement('td');
-    if (!isNumber(server.temp)) {
+    if (!isNumber(server.diskUsed) || !isNumber(server.diskTotal) || server.diskTotal <= 0) {
       td.textContent = '\u2014';
       return td;
     }
-    td.className = 'mono';
-    td.textContent = server.temp.toFixed(1) + ' \u00B0C';
-    if (server.temp >= 80) td.style.color = 'var(--err)';
-    else if (server.temp >= 70) td.style.color = 'var(--warn)';
+    var pct = Math.min(100, Math.max(0, server.diskUsed / server.diskTotal * 100));
+    var text = document.createElement('div');
+    text.className = 'mono';
+    text.textContent = formatSize(server.diskUsed) + ' / ' + formatSize(server.diskTotal) +
+                       ' (' + pct.toFixed(0) + '%)';
+    var bar = document.createElement('div');
+    bar.className = 'bar' + (pct >= 90 ? ' hot' : '');
+    var fill = document.createElement('i');
+    fill.style.width = pct.toFixed(1) + '%';
+    bar.appendChild(fill);
+    td.appendChild(text);
+    td.appendChild(bar);
     return td;
   }
 
@@ -189,9 +213,10 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
       var tr = document.createElement('tr');
       tr.appendChild(serverCell(server));
       tr.appendChild(statusCell(server));
+      tr.appendChild(cpuCell(server));
       tr.appendChild(cell(num(server.load, 2), 'mono'));
       tr.appendChild(memoryCell(server));
-      tr.appendChild(tempCell(server));
+      tr.appendChild(diskCell(server));
       var last = cell(ago(server.ageMs), 'muted hide-sm');
       tr.appendChild(last);
       rows.appendChild(tr);

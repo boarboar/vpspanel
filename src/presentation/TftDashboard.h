@@ -53,7 +53,7 @@ class TftDashboard {
 
  private:
 #if VPSPANEL_HAS_DISPLAY
-  static constexpr size_t kServersPerPage = 2;
+  static constexpr size_t kServersPerPage = 3;
 
   enum class View : uint8_t { Splash, Setup, Dashboard, Detail };
 
@@ -62,7 +62,7 @@ class TftDashboard {
   enum class CardLayout : uint8_t { None, Waiting, Error, Metrics };
 
   // Remembers what is currently visible so an unchanged value never touches
-  // the SPI bus. The colour is part of the identity: the temperature turns red
+  // the SPI bus. The colour is part of the identity: the disk usage turns red
   // without its digits changing.
   //
   // Every call site always draws a given field with the same font, so a font
@@ -78,18 +78,11 @@ class TftDashboard {
     bool blank = false;    // slot deliberately cleared to the screen background
     bool selected = false; // border currently drawn in the selection colour
     CardLayout layout = CardLayout::None;
-    bool labelsDrawn = false;
     TextField name;
     TextField chip;
-    uint16_t chipColor = 0;
-    TextField endpoint;
-    TextField load;
-    TextField mem;
-    TextField temp;
-    TextField note;   // "waiting for first poll..." / "polling is paused"
+    TextField metrics;  // single "CPU: .. MEM: .. DISK: .." line
+    TextField note;     // "waiting for first poll..." / "polling is paused"
     TextField error;
-    int barFilled = -1;  // pixels currently drawn in the memory bar
-    uint16_t barColor = 0;
   };
 
   // Fields of the per-server detail screen. The frame (background plus static
@@ -100,9 +93,10 @@ class TftDashboard {
     TextField name;
     TextField chip;
     TextField endpoint;
+    TextField cpu;
     TextField load;
     TextField mem;
-    TextField temp;
+    TextField disk;
     TextField age;
     TextField took;
     TextField note;

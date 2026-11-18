@@ -9,10 +9,12 @@ struct ServerMetrics {
   bool ok = false;       // the last poll succeeded
   String error;          // human readable reason when ok == false
 
-  float load1 = NAN;      // 1 minute load average
-  float memUsedMb = NAN;  // used memory
-  float memTotalMb = NAN; // total memory
-  float tempC = NAN;      // CPU temperature
+  float cpuPercent = NAN;  // overall CPU usage
+  float load1 = NAN;       // 1 minute load average
+  float memUsedMb = NAN;   // used memory
+  float memTotalMb = NAN;  // total memory
+  float diskUsedMb = NAN;  // used space on the root filesystem
+  float diskTotalMb = NAN; // total space on the root filesystem
 
   uint32_t polledAtMs = 0;  // millis() when the poll finished
   uint32_t durationMs = 0;  // how long the SSH poll took

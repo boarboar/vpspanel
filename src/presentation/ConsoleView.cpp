@@ -11,6 +11,16 @@ String formatValue(float value, uint8_t digits = 1) {
   return String(value, static_cast<unsigned int>(digits));
 }
 
+String formatDisk(const ServerMetrics& metrics) {
+  if (isnan(metrics.diskUsedMb) || isnan(metrics.diskTotalMb) || metrics.diskTotalMb <= 0) {
+    return String("n/a");
+  }
+
+  const float percent = 100.0f * metrics.diskUsedMb / metrics.diskTotalMb;
+  return formatValue(metrics.diskUsedMb, 0) + "/" + formatValue(metrics.diskTotalMb, 0) +
+         " MB (" + formatValue(percent, 0) + "%)";
+}
+
 }  // namespace
 
 void ConsoleView::printBanner() {
@@ -75,12 +85,13 @@ void ConsoleView::onPollFinished(const ServerConfig& server, const ServerMetrics
     return;
   }
 
-  Serial.printf("[ ok ] %s (%s) load=%s mem=%s/%s MB temp=%s C (%u ms)\n",
+  Serial.printf("[ ok ] %s (%s) cpu=%s%% load=%s mem=%s/%s MB disk=%s (%u ms)\n",
                 server.displayName().c_str(), server.endpoint().c_str(),
+                formatValue(metrics.cpuPercent, 1).c_str(),
                 formatValue(metrics.load1, 2).c_str(),
                 formatValue(metrics.memUsedMb, 0).c_str(),
                 formatValue(metrics.memTotalMb, 0).c_str(),
-                formatValue(metrics.tempC, 1).c_str(),
+                formatDisk(metrics).c_str(),
                 static_cast<unsigned>(metrics.durationMs));
 }
 

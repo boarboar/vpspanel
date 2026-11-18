@@ -40,7 +40,20 @@ void parseLoad(const String& value, ServerMetrics& metrics) {
   if (toNumber(value, load)) metrics.load1 = load;
 }
 
-void parseMemory(const String& value, ServerMetrics& metrics) {
+void parseCpu(const String& value, ServerMetrics& metrics) {
+  String text = value;
+  text.replace("%", "");
+
+  float percent = 0;
+  if (!toNumber(text, percent)) return;
+
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  metrics.cpuPercent = percent;
+}
+
+// Parses "used/total" (an optional MB suffix is tolerated) into the given pair.
+void parseUsage(const String& value, float& usedOut, float& totalOut) {
   String text = value;
   text.replace("MB", "");
   text.replace("mb", "");
@@ -50,35 +63,32 @@ void parseMemory(const String& value, ServerMetrics& metrics) {
 
   float used = 0;
   float total = 0;
-  if (toNumber(text.substring(0, slash), used)) metrics.memUsedMb = used;
-  if (toNumber(text.substring(slash + 1), total)) metrics.memTotalMb = total;
-}
-
-void parseTemperature(const String& value, ServerMetrics& metrics) {
-  String text = value;
-  text.replace("C", "");
-  text.replace("c", "");
-  text.replace("\xC2\xB0", "");  // UTF-8 degree sign
-
-  float temp = 0;
-  if (toNumber(text, temp)) metrics.tempC = temp;
+  if (toNumber(text.substring(0, slash), used)) usedOut = used;
+  if (toNumber(text.substring(slash + 1), total)) totalOut = total;
 }
 
 }  // namespace
 
 bool MetricsParser::parse(const String& output, ServerMetrics& metrics) {
+  metrics.cpuPercent = NAN;
   metrics.load1 = NAN;
   metrics.memUsedMb = NAN;
   metrics.memTotalMb = NAN;
-  metrics.tempC = NAN;
+  metrics.diskUsedMb = NAN;
+  metrics.diskTotalMb = NAN;
   metrics.error = "";
 
   String value;
   const bool hasLoad = extractToken(output, "LOAD:", value);
   if (hasLoad) parseLoad(value, metrics);
 
-  if (extractToken(output, "RAM:", value)) parseMemory(value, metrics);
-  if (extractToken(output, "TEMP:", value)) parseTemperature(value, metrics);
+  if (extractToken(output, "RAM:", value)) {
+    parseUsage(value, metrics.memUsedMb, metrics.memTotalMb);
+  }
+  if (extractToken(output, "DISK:", value)) {
+    parseUsage(value, metrics.diskUsedMb, metrics.diskTotalMb);
+  }
+  if (extractToken(output, "CPU:", value)) parseCpu(value, metrics);
 
   if (!hasLoad) {
     metrics.error = "Unexpected command output: " + output;

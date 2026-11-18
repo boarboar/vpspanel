@@ -1,8 +1,8 @@
 # VPS Monitor (ESP32-C3)
 
 An ESP32-C3 dashboard that polls a configurable list of Linux servers over SSH
-and shows load average, memory usage and CPU temperature — on a web page, in the
-serial console, and on an optional ILI9341 TFT panel.
+and shows CPU usage, load average, memory usage and root filesystem usage — on
+a web page, in the serial console, and on an optional ILI9341 TFT panel.
 
 > Based on the original single-server sketch. Polling now runs on its own
 > FreeRTOS task, configuration lives in flash (NVS), and the code is split into
@@ -20,8 +20,9 @@ serial console, and on an optional ILI9341 TFT panel.
   **git-ignored**) and can be entered on the TFT setup screen, where they are
   saved to NVS.
 - Serial console keeps printing poll results, so headless use still works.
-- Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: two server cards per page,
-  automatic paging, Wi-Fi/IP status and poll age. The display can be compiled out.
+- Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: three server cards per
+  page, automatic paging, Wi-Fi/IP status and poll age. The display can be
+  compiled out.
 - Three buttons (**A/B/C**) on the TFT build: select a card, open its detail
   screen, return to the dashboard, and enter Wi-Fi credentials with an on-screen
   keyboard from the boot splash.
@@ -67,7 +68,7 @@ If you connect the optional TFT panel, wire it as described in
 
 | Page              | Purpose                                                       |
 | ----------------- | ------------------------------------------------------------- |
-| `/`               | Live metrics: status, load, memory (with bar), temperature    |
+| `/`               | Live metrics: status, CPU, load, memory (with bar), disk usage |
 | `/servers`        | Add / edit / delete servers, pause polling, change intervals   |
 | `/api/metrics`    | JSON snapshot used by the dashboard                           |
 | `/api/poll`       | `POST` to request an immediate polling cycle                  |
@@ -81,17 +82,18 @@ The firmware can drive a 2.4" 240x320 ILI9341 SPI module (TJCTM24024-SPI) as a
 local dashboard. It renders the same `MonitorService` snapshots as the web page:
 
 - Header: title plus the device IP (or `WiFi offline`).
-- Two server cards per page: name, `host:port`, state chip
-  (`OK` / `ERROR` / `WAIT` / `PAUSED`), load, memory with a usage bar, and CPU
-  temperature (turns amber at 70 °C, red at 80 °C).
+- Three server cards per page: name with `host:port` in brackets, state chip
+  (`OK` / `ERROR` / `WAIT` / `PAUSED`), and one line with CPU, memory and disk
+  usage percentages.
 - Footer: poll interval, `polling...` or the age of the last cycle, and `page x/y`.
-- With more than two servers the view rotates to the next page every 7 s;
+- With more than three servers the view rotates to the next page every 7 s;
   values refresh every 2 s (or immediately when a new poll cycle completes).
 - The panel is initialised before the Wi-Fi association and shows a splash
   screen with the SSID it is about to join, so it is never blank during boot.
-- A full-screen per-server detail view (state, user@host:port, load, memory with
-  bar, CPU temperature, poll age/duration and the SSH error text when a poll
-  failed) is opened from Selection mode with button C.
+- A full-screen per-server detail view (state, user@host:port, CPU usage, load
+  average, memory with bar, root filesystem usage, poll age/duration and the
+  SSH error text when a poll failed) is opened from Selection mode with
+  button C.
 
 ### Buttons
 
@@ -258,7 +260,7 @@ src/
 │   ├── AppSettings.h            poll interval, SSH timeout
 │   ├── ServerConfig.h           one monitored host (plain data)
 │   ├── ServerMetrics.h          one measurement (plain data)
-│   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. TEMP:.."
+│   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. DISK:.. CPU:.."
 │   ├── ServerStore.h            persistence port (interface)
 │   ├── ServerRegistry.{h,cpp}   thread-safe server list + settings CRUD
 │   ├── IMetricsProvider.h       metrics transport port (interface)
@@ -352,7 +354,7 @@ Web UI: http://192.168.1.50/
 mDNS: http://vpspanel.local/
 Free heap: 245000 bytes
 [poll] checking 2 server(s)
-[ ok ] vps-1 (192.168.1.10:22) load=0.15 mem=143/7951 MB temp=41.2 C (812 ms)
+[ ok ] vps-1 (192.168.1.10:22) cpu=12.5% load=0.15 mem=143/7951 MB disk=4123/40258 MB (10%) (812 ms)
 [poll] done: 1 server(s) in 838 ms
 ```
 

@@ -28,8 +28,8 @@ constexpr int kFooterY = 218;
 
 constexpr int kCardX = 5;
 constexpr int kCardW = 310;
-constexpr int kCardH = 88;
-constexpr int kCardGap = 6;
+constexpr int kCardH = 52;
+constexpr int kCardGap = 9;
 constexpr int kCardY0 = 34;
 
 // How often the panel contents are re-evaluated. Actual SPI traffic only
@@ -44,11 +44,6 @@ constexpr uint32_t kDetailRefreshMs = 250;
 // After closing the setup screen, keep the resumed splash visible for a moment
 // even if the boot-time Wi-Fi attempt has already finished.
 constexpr uint32_t kSplashResumeHoldMs = 2000;
-
-constexpr int kBarX = 95;
-constexpr int kBarY = 75;
-constexpr int kBarW = 130;
-constexpr int kBarH = 6;
 
 // Detail screen layout.
 constexpr int kDetailHeaderH = 28;
@@ -126,6 +121,16 @@ void drawWrapped(TFT_eSPI& tft, const String& text, int x, int y, int maxX, int 
   if (lines < maxLines && line.length() > 0) {
     tft.drawString(fitText(line, maxChars), x, y + lines * 10, 1);
   }
+}
+
+float usagePercent(float used, float total) {
+  if (isnan(used) || isnan(total) || total <= 0) return NAN;
+  return 100.0f * used / total;
+}
+
+String percentText(float percent) {
+  if (isnan(percent)) return String("n/a");
+  return String(static_cast<int>(lroundf(percent))) + "%";
 }
 
 }  // namespace
@@ -392,9 +397,17 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     cache.selected = selected;
   }
 
-  // ---- fixed top row -----------------------------------------------------
-  const String name = ellipsize(tft_, server.displayName(), 2, 194);
-  drawField(cache.name, name, x + 10, y + 6, 2, kText, x + 204);
+  // ---- fixed top row: name followed by "host:port" in brackets ------------
+  const String suffix = " (" + server.endpoint() + ")";
+  const int suffixWidth = tft_.textWidth(suffix, 2);
+  String title;
+  if (suffixWidth < 194) {
+    title = ellipsize(tft_, server.displayName(), 2, 194 - suffixWidth) + suffix;
+  } else {
+    // Pathological host name: keep the endpoint readable instead.
+    title = ellipsize(tft_, server.endpoint(), 2, 194);
+  }
+  drawField(cache.name, title, x + 10, y + 6, 2, kText, x + 204);
 
   uint16_t chipColor = kMuted;
   const char* chip = "WAIT";
@@ -409,10 +422,7 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
   }
   drawRightField(cache.chip, chip, x + kCardW - 10, y + 6, x + 220, 82, 2, chipColor);
 
-  const String endpoint = ellipsize(tft_, server.endpoint(), 1, kCardW - 20);
-  drawField(cache.endpoint, endpoint, x + 10, y + 25, 1, kMuted, x + kCardW - 10);
-
-  // ---- lower body: layout may change between waiting/error/metrics -------
+  // ---- body: layout may change between waiting/error/metrics -------------
   CardLayout layout = CardLayout::Waiting;
   if (metrics.valid) layout = metrics.ok ? CardLayout::Metrics : CardLayout::Error;
 
@@ -420,29 +430,24 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     // Different widgets will occupy the body, so clear it once. This only
     // happens on real state changes (first data, error start/end), not on
     // every refresh.
-    tft_.fillRect(x + 6, y + 34, kCardW - 12, 50, kPanel);
+    tft_.fillRect(x + 6, y + 24, kCardW - 12, kCardH - 30, kPanel);
     cache.layout = layout;
-    cache.labelsDrawn = false;
     cache.note.valid = false;
+    cache.metrics.valid = false;
     cache.error.valid = false;
-    cache.load.valid = false;
-    cache.mem.valid = false;
-    cache.temp.valid = false;
-    cache.barFilled = -1;
-    cache.barColor = 0;
   }
 
   if (layout == CardLayout::Waiting) {
     const String note = server.enabled ? "waiting for first poll..." : "polling is paused";
-    drawField(cache.note, note, x + 10, y + 44, 2, kMuted, x + kCardW - 10);
+    drawField(cache.note, note, x + 10, y + 27, 2, kMuted, x + kCardW - 10);
     return;
   }
 
   if (layout == CardLayout::Error) {
     if (!cache.error.valid || cache.error.text != metrics.error) {
       // A longer previous message must not leave fragments behind.
-      tft_.fillRect(x + 6, y + 34, kCardW - 12, 50, kPanel);
-      drawWrapped(tft_, metrics.error, x + 10, y + 42, x + kCardW - 10, 2, kErr, kPanel);
+      tft_.fillRect(x + 6, y + 24, kCardW - 12, kCardH - 30, kPanel);
+      drawWrapped(tft_, metrics.error, x + 10, y + 27, x + kCardW - 10, 2, kErr, kPanel);
       cache.error.text = metrics.error;
       cache.error.color = kErr;
       cache.error.valid = true;
@@ -450,62 +455,19 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     return;
   }
 
-  // ---- metrics -----------------------------------------------------------
-  if (!cache.labelsDrawn) {
-    tft_.setTextDatum(TL_DATUM);
-    tft_.setTextColor(kMuted, kPanel);
-    tft_.drawString("LOAD", x + 10, y + 38, 1);
-    tft_.drawString("MEM", x + 95, y + 38, 1);
-    tft_.drawString("TEMP C", x + 240, y + 38, 1);
-    cache.labelsDrawn = true;
-  }
-
-  String loadText;
-  if (isnan(metrics.load1)) {
-    loadText = "--";
-  } else {
-    loadText = metrics.load1 < 10 ? String(metrics.load1, 2) : String(metrics.load1, 1);
-  }
-  drawField(cache.load, loadText, x + 10, y + 47, 4, kAccent, x + 90);
-
-  if (!isnan(metrics.memUsedMb) && !isnan(metrics.memTotalMb) && metrics.memTotalMb > 0) {
-    const float percent = 100.0f * metrics.memUsedMb / metrics.memTotalMb;
-    const String memory = String(static_cast<int>(lroundf(metrics.memUsedMb))) + "/" +
-                          String(static_cast<int>(lroundf(metrics.memTotalMb))) + " MB";
-    drawField(cache.mem, memory, x + 95, y + 51, 2, kText, x + 230);
-
-    int filled = static_cast<int>(kBarW * percent / 100.0f + 0.5f);
-    filled = filled < 0 ? 0 : (filled > kBarW ? kBarW : filled);
-    const uint16_t color = percent >= 90 ? kErr : kAccent;
-    if (filled != cache.barFilled || color != cache.barColor) {
-      drawBar(tft_, x + kBarX, y + kBarY, kBarW, kBarH, percent, color);
-      cache.barFilled = filled;
-      cache.barColor = color;
-    }
-  } else {
-    drawField(cache.mem, "n/a", x + 95, y + 51, 2, kMuted, x + 230);
-    if (cache.barFilled >= 0) {
-      tft_.fillRect(x + kBarX, y + kBarY, kBarW, kBarH, kPanel);
-      cache.barFilled = -1;
-      cache.barColor = 0;
-    }
-  }
-
-  if (!isnan(metrics.tempC)) {
-    const uint16_t color =
-        metrics.tempC >= 80 ? kErr : (metrics.tempC >= 70 ? kWarn : kText);
-    drawField(cache.temp, String(static_cast<int>(lroundf(metrics.tempC))), x + 240,
-              y + 47, 4, color, x + kCardW - 8);
-  } else {
-    // Keep font 4 here so a value <-> "n/a" transition never changes metrics.
-    drawField(cache.temp, "n/a", x + 240, y + 47, 4, kMuted, x + kCardW - 8);
-  }
+  // ---- all metrics on one line -------------------------------------------
+  const String line =
+      "CPU: " + percentText(metrics.cpuPercent) + "  MEM: " +
+      percentText(usagePercent(metrics.memUsedMb, metrics.memTotalMb)) + "  DISK: " +
+      percentText(usagePercent(metrics.diskUsedMb, metrics.diskTotalMb));
+  drawField(cache.metrics, line, x + 10, y + 27, 2, kText, x + kCardW - 10);
 }
 
 void TftDashboard::drawEmptyCard() {
   const int x = kCardX;
   const int y = kCardY0;
-  const int height = kCardH * static_cast<int>(kServersPerPage) + kCardGap;
+  const int height =
+      kCardH * static_cast<int>(kServersPerPage) + kCardGap * (static_cast<int>(kServersPerPage) - 1);
 
   if (!emptyDrawn_) {
     tft_.fillRoundRect(x, y, kCardW, height, 8, kPanel);
@@ -753,8 +715,9 @@ void TftDashboard::drawDetailFrame() {
   tft_.drawFastHLine(10, kDetailDivider2Y, kScreenW - 20, kLine);
 
   tft_.setTextColor(kMuted, kPanel);
-  tft_.drawString("LOAD 1m", 10, 88, 1);
-  tft_.drawString("TEMP C", 250, 88, 1);
+  tft_.drawString("CPU %", 10, 88, 1);
+  tft_.drawString("LOAD 1m", 120, 88, 1);
+  tft_.drawString("DISK %", 250, 88, 1);
   tft_.drawString("MEMORY", 10, 136, 1);
   tft_.drawString("LAST POLL", 10, 182, 1);
   tft_.drawString("TOOK", 205, 182, 1);
@@ -788,6 +751,14 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
   endpoint = ellipsize(tft_, endpoint, 1, kScreenW - 20);
   drawField(detail_.endpoint, endpoint, 10, 64, 1, kMuted, kScreenW - 10);
 
+  // ---- CPU usage ---------------------------------------------------------
+  if (!isnan(metrics.cpuPercent)) {
+    drawField(detail_.cpu, String(static_cast<int>(lroundf(metrics.cpuPercent))), 10, 96,
+              4, kAccent, 110);
+  } else {
+    drawField(detail_.cpu, "n/a", 10, 96, 4, kMuted, 110);
+  }
+
   // ---- load --------------------------------------------------------------
   String loadText;
   if (isnan(metrics.load1)) {
@@ -795,17 +766,16 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
   } else {
     loadText = metrics.load1 < 10 ? String(metrics.load1, 2) : String(metrics.load1, 1);
   }
-  drawField(detail_.load, loadText, 10, 96, 4, kAccent, 230);
+  drawField(detail_.load, loadText, 120, 96, 4, kAccent, 235);
 
-  // ---- temperature -------------------------------------------------------
-  if (!isnan(metrics.tempC)) {
-    const uint16_t color =
-        metrics.tempC >= 80 ? kErr : (metrics.tempC >= 70 ? kWarn : kText);
-    drawRightField(detail_.temp,
-                   String(static_cast<int>(lroundf(metrics.tempC))) + " C", kScreenW - 10,
+  // ---- root filesystem usage ---------------------------------------------
+  if (!isnan(metrics.diskUsedMb) && !isnan(metrics.diskTotalMb) && metrics.diskTotalMb > 0) {
+    const float percent = 100.0f * metrics.diskUsedMb / metrics.diskTotalMb;
+    const uint16_t color = percent >= 90 ? kErr : (percent >= 75 ? kWarn : kText);
+    drawRightField(detail_.disk, String(static_cast<int>(lroundf(percent))), kScreenW - 10,
                    96, 240, 72, 4, color);
   } else {
-    drawRightField(detail_.temp, "n/a", kScreenW - 10, 96, 240, 72, 4, kMuted);
+    drawRightField(detail_.disk, "n/a", kScreenW - 10, 96, 240, 72, 4, kMuted);
   }
 
   // ---- memory ------------------------------------------------------------
