@@ -53,7 +53,7 @@ class TftDashboard {
 
  private:
 #if VPSPANEL_HAS_DISPLAY
-  static constexpr size_t kServersPerPage = 3;
+  static constexpr size_t kServersPerPage = 4;
 
   enum class View : uint8_t { Splash, Setup, Dashboard, Detail };
 
@@ -73,6 +73,12 @@ class TftDashboard {
     bool valid = false;
   };
 
+  // One CPU/memory/disk gauge on a dashboard card.
+  struct GaugeCache {
+    int percent = -1;   // last rounded percentage, -1 when the metric has no data
+    bool valid = false; // false until this gauge has been painted
+  };
+
   struct CardCache {
     bool drawn = false;    // card background and border are on screen
     bool blank = false;    // slot deliberately cleared to the screen background
@@ -80,8 +86,8 @@ class TftDashboard {
     CardLayout layout = CardLayout::None;
     TextField name;
     TextField chip;
-    TextField metrics;  // single "CPU: .. MEM: .. DISK: .." line
-    TextField note;     // "waiting for first poll..." / "polling is paused"
+    GaugeCache gauges[3];  // CPU, MEM, DISK
+    TextField note;        // "waiting for first poll..." / "polling is paused"
     TextField error;
   };
 
@@ -93,16 +99,17 @@ class TftDashboard {
     TextField name;
     TextField chip;
     TextField endpoint;
-    TextField cpu;
-    TextField load;
+    TextField cpu;    // percentage
+    TextField load;   // "LA 1.24"
+    TextField cores;  // "8 cores"
     TextField mem;
     TextField disk;
-    TextField age;
-    TextField took;
-    TextField note;
-    uint8_t noteKind = 0;  // 0 = nothing, 1 = waiting, 2 = error
+    TextField info;   // uptime, or the waiting/error message
+    uint8_t infoKind = 0;  // 0 = uptime, 1 = muted note, 2 = error
     int barFilled = -1;
     uint16_t barColor = 0;
+    int diskBarFilled = -1;
+    uint16_t diskBarColor = 0;
   };
 
   void drawSplash(const String& wifiSsid);

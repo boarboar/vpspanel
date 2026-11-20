@@ -11,10 +11,12 @@ struct ServerMetrics {
 
   float cpuPercent = NAN;  // overall CPU usage
   float load1 = NAN;       // 1 minute load average
+  float cpuCores = NAN;    // number of logical CPUs
   float memUsedMb = NAN;   // used memory
   float memTotalMb = NAN;  // total memory
   float diskUsedMb = NAN;  // used space on the root filesystem
   float diskTotalMb = NAN; // total space on the root filesystem
+  float uptimeSec = NAN;   // seconds since the host booted
 
   uint32_t polledAtMs = 0;  // millis() when the poll finished
   uint32_t durationMs = 0;  // how long the SSH poll took

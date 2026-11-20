@@ -72,10 +72,12 @@ void parseUsage(const String& value, float& usedOut, float& totalOut) {
 bool MetricsParser::parse(const String& output, ServerMetrics& metrics) {
   metrics.cpuPercent = NAN;
   metrics.load1 = NAN;
+  metrics.cpuCores = NAN;
   metrics.memUsedMb = NAN;
   metrics.memTotalMb = NAN;
   metrics.diskUsedMb = NAN;
   metrics.diskTotalMb = NAN;
+  metrics.uptimeSec = NAN;
   metrics.error = "";
 
   String value;
@@ -87,6 +89,14 @@ bool MetricsParser::parse(const String& output, ServerMetrics& metrics) {
   }
   if (extractToken(output, "DISK:", value)) {
     parseUsage(value, metrics.diskUsedMb, metrics.diskTotalMb);
+  }
+  if (extractToken(output, "CORES:", value)) {
+    float cores = 0;
+    if (toNumber(value, cores) && cores > 0) metrics.cpuCores = cores;
+  }
+  if (extractToken(output, "UPTIME:", value)) {
+    float uptime = 0;
+    if (toNumber(value, uptime) && uptime >= 0) metrics.uptimeSec = uptime;
   }
   if (extractToken(output, "CPU:", value)) parseCpu(value, metrics);
 

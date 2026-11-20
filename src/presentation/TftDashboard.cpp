@@ -23,14 +23,28 @@ static_assert(TFT_WIDTH == 240 && TFT_HEIGHT == 320, "Expected a 240x320 ILI9341
 
 namespace {
 
-constexpr int kHeaderH = 30;
-constexpr int kFooterY = 218;
+constexpr int kHeaderH = 24;
+constexpr int kFooterY = 224;  // 16 px tall footer
 
+// Four cards share the space between header and footer. The tighter card and
+// gap keep all four visible on the 240 px tall panel.
 constexpr int kCardX = 5;
 constexpr int kCardW = 310;
-constexpr int kCardH = 52;
-constexpr int kCardGap = 9;
-constexpr int kCardY0 = 34;
+constexpr int kCardH = 44;
+constexpr int kCardGap = 6;
+constexpr int kCardY0 = 28;
+
+// Usage gauges inside a card, relative to its top-left corner. The label row
+// and the bar both stay inside the 20 px body, so the tighter card still shows
+// all three gauges.
+constexpr int kGaugeLabelY = 21;
+constexpr int kGaugeY = 30;
+constexpr int kGaugeH = 10;
+constexpr int kGaugeGap = 6;
+constexpr int kGaugeCount = 3;
+
+static_assert(kGaugeLabelY >= 20, "gauge labels must stay below the title row");
+static_assert(kGaugeY + kGaugeH <= kCardH - 2, "usage gauges must fit inside a card");
 
 // How often the panel contents are re-evaluated. Actual SPI traffic only
 // happens for fields whose value or colour changed in the meantime.
@@ -45,15 +59,26 @@ constexpr uint32_t kDetailRefreshMs = 250;
 // even if the boot-time Wi-Fi attempt has already finished.
 constexpr uint32_t kSplashResumeHoldMs = 2000;
 
-// Detail screen layout.
+// Detail screen layout: a compact identity block, then four stacked sections
+// (CPU, memory, disk, info), each with a small title and a value row.
 constexpr int kDetailHeaderH = 28;
-constexpr int kDetailDivider1Y = 80;
-constexpr int kDetailDivider2Y = 130;
+constexpr int kDetailIdentityDividerY = 70;
+constexpr int kDetailCpuY = 72;
+constexpr int kDetailMemY = 112;
+constexpr int kDetailDiskY = 152;
+constexpr int kDetailInfoY = 192;
+constexpr int kDetailSectionH = 40;
+constexpr int kDetailTitleDY = 4;
+constexpr int kDetailValueDY = 14;
 constexpr int kDetailBarX = 10;
-constexpr int kDetailBarY = 166;
 constexpr int kDetailBarW = 300;
 constexpr int kDetailBarH = 6;
-constexpr int kDetailNoteY = 196;
+constexpr int kDetailGaugeDY = 31;
+constexpr int kDetailInfoClearY = 204;
+constexpr int kDetailInfoClearH = 26;
+
+static_assert(kDetailInfoY + kDetailSectionH <= kScreenH, "detail sections must fit");
+static_assert(kDetailGaugeDY + kDetailBarH < kDetailSectionH, "detail bars must fit");
 
 int cardY(size_t slot) {
   return kCardY0 + static_cast<int>(slot) * (kCardH + kCardGap);
@@ -128,9 +153,71 @@ float usagePercent(float used, float total) {
   return 100.0f * used / total;
 }
 
-String percentText(float percent) {
-  if (isnan(percent)) return String("n/a");
-  return String(static_cast<int>(lroundf(percent))) + "%";
+// Disk volumes are shown in GB once they reach 1 GiB; smaller ones stay in MB.
+String formatDiskUsage(float usedMb, float totalMb) {
+  const float percent = usagePercent(usedMb, totalMb);
+  if (isnan(percent)) return "n/a";
+
+  String text;
+  if (totalMb >= 1024.0f) {
+    text = String(usedMb / 1024.0f, 1) + "/" + String(totalMb / 1024.0f, 1) + " GB";
+  } else {
+    text = String(static_cast<int>(lroundf(usedMb))) + "/" +
+           String(static_cast<int>(lroundf(totalMb))) + " MB";
+  }
+  return text + " (" + String(static_cast<int>(lroundf(percent))) + "%)";
+}
+
+String formatUptime(float seconds) {
+  if (isnan(seconds) || seconds < 0) return "n/a";
+
+  const uint32_t total = static_cast<uint32_t>(seconds + 0.5f);
+  const uint32_t days = total / 86400;
+  const uint32_t hours = (total % 86400) / 3600;
+  const uint32_t minutes = (total % 3600) / 60;
+  const uint32_t secs = total % 60;
+
+  if (days > 0) return String(days) + "d " + String(hours) + "h";
+  if (hours > 0) return String(hours) + "h " + String(minutes) + "m";
+  if (minutes > 0) return String(minutes) + "m " + String(secs) + "s";
+  return String(secs) + "s";
+}
+
+// Gauge fills are a little deeper than kErr/kOk so the white percentage text
+// stays legible on both the used (red) and the free (green) part.
+constexpr uint16_t kGaugeUsed = rgb565(206, 61, 61);
+constexpr uint16_t kGaugeFree = rgb565(30, 145, 92);
+
+// A pill-shaped usage gauge: the green track is the free part and the red
+// overlay is the used part. The percentage is written on top in white, so it
+// stays readable over either colour. `percent` < 0 means "no data".
+void drawUsageGauge(TFT_eSPI& tft, int x, int y, int width, int height, int percent) {
+  const int radius = height / 2;
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(kText);
+
+  if (percent < 0) {
+    tft.fillRoundRect(x, y, width, height, radius, kPanel2);
+    tft.drawRoundRect(x, y, width, height, radius, kLine);
+    tft.drawString("n/a", x + width / 2, y + height / 2, 1);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  tft.fillRoundRect(x, y, width, height, radius, kGaugeFree);
+
+  const int used = (width * percent + 50) / 100;
+  if (used > 0) {
+    // Round the used part on both ends so it reads as a gauge rather than a
+    // rectangle glued onto the green track.
+    const int usedRadius = used < height ? used / 2 : radius;
+    tft.fillRoundRect(x, y, used, height, usedRadius, kGaugeUsed);
+  }
+
+  tft.drawRoundRect(x, y, width, height, radius, kLine);
+  tft.drawString(String(percent) + "%", x + width / 2, y + height / 2, 1);
+  tft.setTextDatum(TL_DATUM);
 }
 
 }  // namespace
@@ -289,6 +376,10 @@ void TftDashboard::drawSplash(const String& wifiSsid) {
 
 void TftDashboard::renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots,
                                    size_t pages) {
+  static_assert(kCardY0 + static_cast<int>(kServersPerPage) * kCardH +
+                        (static_cast<int>(kServersPerPage) - 1) * kCardGap <= kFooterY,
+                "server cards must fit between the header and the footer");
+
   tft_.startWrite();
 
   ensureChrome();
@@ -340,7 +431,7 @@ void TftDashboard::ensureChrome() {
 
   tft_.setTextDatum(TL_DATUM);
   tft_.setTextColor(kAccent, kPanel);
-  tft_.drawString("VPS MONITOR", 8, 7, 2);
+  tft_.drawString("VPS MONITOR", 8, 4, 2);
 
   headerRight_.valid = false;
   footerLeft_.valid = false;
@@ -352,7 +443,7 @@ void TftDashboard::updateHeader() {
   const String ip = WiFi.localIP().toString();
   const bool online = WiFi.status() == WL_CONNECTED && ip != "0.0.0.0";
 
-  drawRightField(headerRight_, online ? ip : String("WiFi offline"), kScreenW - 8, 11,
+  drawRightField(headerRight_, online ? ip : String("WiFi offline"), kScreenW - 8, 8,
                  kScreenW - 148, 140, 1, online ? kMuted : kErr);
 }
 
@@ -360,11 +451,11 @@ void TftDashboard::updateFooter(size_t pages) {
   const uint16_t color =
       monitor_.isPolling() ? kWarn : (selecting_ ? kSelected : kMuted);
   const String left = ellipsize(tft_, footerText(), 1, 232);
-  drawField(footerLeft_, left, 8, kFooterY + 7, 1, color, 8 + 232);
+  drawField(footerLeft_, left, 8, kFooterY + 4, 1, color, 8 + 232);
 
   String label;
   if (pages > 1) label = String(page_ + 1) + "/" + String(pages);
-  drawRightField(footerPage_, label, kScreenW - 8, kFooterY + 7, kScreenW - 50, 42, 1,
+  drawRightField(footerPage_, label, kScreenW - 8, kFooterY + 4, kScreenW - 50, 42, 1,
                  kMuted);
 }
 
@@ -407,7 +498,7 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     // Pathological host name: keep the endpoint readable instead.
     title = ellipsize(tft_, server.endpoint(), 2, 194);
   }
-  drawField(cache.name, title, x + 10, y + 6, 2, kText, x + 204);
+  drawField(cache.name, title, x + 10, y + 4, 2, kText, x + 204);
 
   uint16_t chipColor = kMuted;
   const char* chip = "WAIT";
@@ -420,7 +511,7 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     chipColor = kErr;
     chip = "ERROR";
   }
-  drawRightField(cache.chip, chip, x + kCardW - 10, y + 6, x + 220, 82, 2, chipColor);
+  drawRightField(cache.chip, chip, x + kCardW - 10, y + 4, x + 220, 82, 2, chipColor);
 
   // ---- body: layout may change between waiting/error/metrics -------------
   CardLayout layout = CardLayout::Waiting;
@@ -430,24 +521,24 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     // Different widgets will occupy the body, so clear it once. This only
     // happens on real state changes (first data, error start/end), not on
     // every refresh.
-    tft_.fillRect(x + 6, y + 24, kCardW - 12, kCardH - 30, kPanel);
+    tft_.fillRect(x + 6, y + 20, kCardW - 12, kCardH - 24, kPanel);
     cache.layout = layout;
     cache.note.valid = false;
-    cache.metrics.valid = false;
     cache.error.valid = false;
+    for (auto& gauge : cache.gauges) gauge = GaugeCache{};
   }
 
   if (layout == CardLayout::Waiting) {
     const String note = server.enabled ? "waiting for first poll..." : "polling is paused";
-    drawField(cache.note, note, x + 10, y + 27, 2, kMuted, x + kCardW - 10);
+    drawField(cache.note, note, x + 10, y + 22, 2, kMuted, x + kCardW - 10);
     return;
   }
 
   if (layout == CardLayout::Error) {
     if (!cache.error.valid || cache.error.text != metrics.error) {
       // A longer previous message must not leave fragments behind.
-      tft_.fillRect(x + 6, y + 24, kCardW - 12, kCardH - 30, kPanel);
-      drawWrapped(tft_, metrics.error, x + 10, y + 27, x + kCardW - 10, 2, kErr, kPanel);
+      tft_.fillRect(x + 6, y + 20, kCardW - 12, kCardH - 24, kPanel);
+      drawWrapped(tft_, metrics.error, x + 10, y + 22, x + kCardW - 10, 2, kErr, kPanel);
       cache.error.text = metrics.error;
       cache.error.color = kErr;
       cache.error.valid = true;
@@ -455,12 +546,36 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     return;
   }
 
-  // ---- all metrics on one line -------------------------------------------
-  const String line =
-      "CPU: " + percentText(metrics.cpuPercent) + "  MEM: " +
-      percentText(usagePercent(metrics.memUsedMb, metrics.memTotalMb)) + "  DISK: " +
-      percentText(usagePercent(metrics.diskUsedMb, metrics.diskTotalMb));
-  drawField(cache.metrics, line, x + 10, y + 27, 2, kText, x + kCardW - 10);
+  // ---- CPU / memory / disk usage gauges ----------------------------------
+  static const char* const kGaugeLabels[kGaugeCount] = {"CPU", "MEM", "DISK"};
+  const float percents[kGaugeCount] = {
+      metrics.cpuPercent,
+      usagePercent(metrics.memUsedMb, metrics.memTotalMb),
+      usagePercent(metrics.diskUsedMb, metrics.diskTotalMb),
+  };
+
+  const int gaugeWidth = (kCardW - 20 - (kGaugeCount - 1) * kGaugeGap) / kGaugeCount;
+  for (int i = 0; i < kGaugeCount; ++i) {
+    int percent = -1;
+    if (!isnan(percents[i])) {
+      percent = static_cast<int>(lroundf(percents[i]));
+      if (percent < 0) percent = 0;
+      if (percent > 100) percent = 100;
+    }
+
+    GaugeCache& gauge = cache.gauges[i];
+    if (gauge.valid && gauge.percent == percent) continue;
+
+    const int gaugeX = x + 10 + i * (gaugeWidth + kGaugeGap);
+    if (!gauge.valid) {
+      tft_.setTextDatum(TL_DATUM);
+      tft_.setTextColor(kMuted, kPanel);
+      tft_.drawString(kGaugeLabels[i], gaugeX, y + kGaugeLabelY, 1);
+    }
+    drawUsageGauge(tft_, gaugeX, y + kGaugeY, gaugeWidth, kGaugeH, percent);
+    gauge.percent = percent;
+    gauge.valid = true;
+  }
 }
 
 void TftDashboard::drawEmptyCard() {
@@ -711,16 +826,16 @@ void TftDashboard::drawDetailFrame() {
   tft_.drawString("C: back", kScreenW - 8, 8, 1);
 
   tft_.setTextDatum(TL_DATUM);
-  tft_.drawFastHLine(10, kDetailDivider1Y, kScreenW - 20, kLine);
-  tft_.drawFastHLine(10, kDetailDivider2Y, kScreenW - 20, kLine);
+  tft_.drawFastHLine(10, kDetailIdentityDividerY, kScreenW - 20, kLine);
+  tft_.drawFastHLine(10, kDetailMemY - 2, kScreenW - 20, kLine);
+  tft_.drawFastHLine(10, kDetailDiskY - 2, kScreenW - 20, kLine);
+  tft_.drawFastHLine(10, kDetailInfoY - 2, kScreenW - 20, kLine);
 
   tft_.setTextColor(kMuted, kPanel);
-  tft_.drawString("CPU %", 10, 88, 1);
-  tft_.drawString("LOAD 1m", 120, 88, 1);
-  tft_.drawString("DISK %", 250, 88, 1);
-  tft_.drawString("MEMORY", 10, 136, 1);
-  tft_.drawString("LAST POLL", 10, 182, 1);
-  tft_.drawString("TOOK", 205, 182, 1);
+  tft_.drawString("CPU", 10, kDetailCpuY + kDetailTitleDY, 1);
+  tft_.drawString("MEMORY", 10, kDetailMemY + kDetailTitleDY, 1);
+  tft_.drawString("DISK", 10, kDetailDiskY + kDetailTitleDY, 1);
+  tft_.drawString("INFO", 10, kDetailInfoY + kDetailTitleDY, 1);
 }
 
 void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
@@ -731,7 +846,7 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
 
   // ---- identity ----------------------------------------------------------
   const String name = ellipsize(tft_, server.displayName(), 4, 185);
-  drawField(detail_.name, name, 10, 34, 4, kText, 200);
+  drawField(detail_.name, name, 10, 30, 4, kText, 200);
 
   uint16_t chipColor = kMuted;
   const char* chip = "WAIT";
@@ -744,39 +859,40 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
     chipColor = kErr;
     chip = "ERROR";
   }
-  drawRightField(detail_.chip, chip, kScreenW - 10, 40, 205, 107, 2, chipColor);
+  drawRightField(detail_.chip, chip, kScreenW - 10, 34, 205, 107, 2, chipColor);
 
   String endpoint = server.user.length() > 0 ? server.user + "@" + server.endpoint()
                                              : server.endpoint();
   endpoint = ellipsize(tft_, endpoint, 1, kScreenW - 20);
-  drawField(detail_.endpoint, endpoint, 10, 64, 1, kMuted, kScreenW - 10);
+  drawField(detail_.endpoint, endpoint, 10, 58, 1, kMuted, kScreenW - 10);
 
-  // ---- CPU usage ---------------------------------------------------------
+  // ---- CPU: usage, load average and core count ---------------------------
+  const int cpuY = kDetailCpuY + kDetailValueDY;
   if (!isnan(metrics.cpuPercent)) {
-    drawField(detail_.cpu, String(static_cast<int>(lroundf(metrics.cpuPercent))), 10, 96,
-              4, kAccent, 110);
+    const String cpu = String(static_cast<int>(lroundf(metrics.cpuPercent))) + "%";
+    drawField(detail_.cpu, cpu, 10, cpuY, 2, kAccent, 90);
   } else {
-    drawField(detail_.cpu, "n/a", 10, 96, 4, kMuted, 110);
+    drawField(detail_.cpu, "n/a", 10, cpuY, 2, kMuted, 90);
   }
 
-  // ---- load --------------------------------------------------------------
   String loadText;
   if (isnan(metrics.load1)) {
-    loadText = "n/a";
+    loadText = "LA n/a";
   } else {
-    loadText = metrics.load1 < 10 ? String(metrics.load1, 2) : String(metrics.load1, 1);
+    loadText = "LA " + (metrics.load1 < 10 ? String(metrics.load1, 2)
+                                           : String(metrics.load1, 1));
   }
-  drawField(detail_.load, loadText, 120, 96, 4, kAccent, 235);
+  drawField(detail_.load, loadText, 95, cpuY, 2, isnan(metrics.load1) ? kMuted : kText,
+            230);
 
-  // ---- root filesystem usage ---------------------------------------------
-  if (!isnan(metrics.diskUsedMb) && !isnan(metrics.diskTotalMb) && metrics.diskTotalMb > 0) {
-    const float percent = 100.0f * metrics.diskUsedMb / metrics.diskTotalMb;
-    const uint16_t color = percent >= 90 ? kErr : (percent >= 75 ? kWarn : kText);
-    drawRightField(detail_.disk, String(static_cast<int>(lroundf(percent))), kScreenW - 10,
-                   96, 240, 72, 4, color);
-  } else {
-    drawRightField(detail_.disk, "n/a", kScreenW - 10, 96, 240, 72, 4, kMuted);
+  const bool coresKnown = !isnan(metrics.cpuCores) && metrics.cpuCores > 0;
+  String coresText = "n/a";
+  if (coresKnown) {
+    const int cores = static_cast<int>(lroundf(metrics.cpuCores));
+    coresText = String(cores) + (cores == 1 ? " core" : " cores");
   }
+  drawRightField(detail_.cores, coresText, kScreenW - 10, cpuY, 232, 78, 2,
+                 coresKnown ? kText : kMuted);
 
   // ---- memory ------------------------------------------------------------
   if (!isnan(metrics.memUsedMb) && !isnan(metrics.memTotalMb) && metrics.memTotalMb > 0) {
@@ -785,74 +901,89 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
         String(static_cast<int>(lroundf(metrics.memUsedMb))) + "/" +
         String(static_cast<int>(lroundf(metrics.memTotalMb))) + " MB (" +
         String(static_cast<int>(lroundf(percent))) + "%)";
-    drawField(detail_.mem, memory, 10, 146, 2, kText, kScreenW - 10);
+    drawField(detail_.mem, memory, 10, kDetailMemY + kDetailValueDY, 2, kText,
+              kScreenW - 10);
 
     int filled = static_cast<int>(kDetailBarW * percent / 100.0f + 0.5f);
     filled = filled < 0 ? 0 : (filled > kDetailBarW ? kDetailBarW : filled);
     const uint16_t color = percent >= 90 ? kErr : kAccent;
     if (filled != detail_.barFilled || color != detail_.barColor) {
-      drawBar(tft_, kDetailBarX, kDetailBarY, kDetailBarW, kDetailBarH, percent, color);
+      drawBar(tft_, kDetailBarX, kDetailMemY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+              percent, color);
       detail_.barFilled = filled;
       detail_.barColor = color;
     }
   } else {
-    drawField(detail_.mem, "n/a", 10, 146, 2, kMuted, kScreenW - 10);
+    drawField(detail_.mem, "n/a", 10, kDetailMemY + kDetailValueDY, 2, kMuted,
+              kScreenW - 10);
     if (detail_.barFilled >= 0) {
-      tft_.fillRect(kDetailBarX, kDetailBarY, kDetailBarW, kDetailBarH, kPanel);
+      tft_.fillRect(kDetailBarX, kDetailMemY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+                    kPanel);
       detail_.barFilled = -1;
       detail_.barColor = 0;
     }
   }
 
-  // ---- poll age / duration ----------------------------------------------
-  String ageText = "--";
-  if (metrics.polledAtMs != 0) {
-    const uint32_t ageSec = (millis() - metrics.polledAtMs) / 1000;
-    if (ageSec < 60) {
-      ageText = String(ageSec) + "s ago";
-    } else if (ageSec < 3600) {
-      ageText = String(ageSec / 60) + " min ago";
-    } else {
-      ageText = String(ageSec / 3600) + " h ago";
+  // ---- disk: same layout as memory ---------------------------------------
+  if (!isnan(metrics.diskUsedMb) && !isnan(metrics.diskTotalMb) &&
+      metrics.diskTotalMb > 0) {
+    const float percent = 100.0f * metrics.diskUsedMb / metrics.diskTotalMb;
+    drawField(detail_.disk, formatDiskUsage(metrics.diskUsedMb, metrics.diskTotalMb), 10,
+              kDetailDiskY + kDetailValueDY, 2, kText, kScreenW - 10);
+
+    int filled = static_cast<int>(kDetailBarW * percent / 100.0f + 0.5f);
+    filled = filled < 0 ? 0 : (filled > kDetailBarW ? kDetailBarW : filled);
+    const uint16_t color = percent >= 90 ? kErr : kAccent;
+    if (filled != detail_.diskBarFilled || color != detail_.diskBarColor) {
+      drawBar(tft_, kDetailBarX, kDetailDiskY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+              percent, color);
+      detail_.diskBarFilled = filled;
+      detail_.diskBarColor = color;
+    }
+  } else {
+    drawField(detail_.disk, "n/a", 10, kDetailDiskY + kDetailValueDY, 2, kMuted,
+              kScreenW - 10);
+    if (detail_.diskBarFilled >= 0) {
+      tft_.fillRect(kDetailBarX, kDetailDiskY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+                    kPanel);
+      detail_.diskBarFilled = -1;
+      detail_.diskBarColor = 0;
     }
   }
-  drawField(detail_.age, ageText, 80, 182, 1, kMuted, 200);
 
-  String tookText = "--";
-  if (metrics.valid) {
-    tookText = metrics.durationMs < 1000 ? String(metrics.durationMs) + " ms"
-                                         : String(metrics.durationMs / 1000.0f, 1) + " s";
-  }
-  drawField(detail_.took, tookText, 240, 182, 1, kMuted, kScreenW - 10);
-
-  // ---- waiting / error note ---------------------------------------------
-  uint8_t noteKind = 0;
-  String noteText;
+  // ---- info: uptime, or the reason data is unavailable -------------------
+  uint8_t infoKind = 0;
+  String infoText;
   if (!server.enabled) {
-    noteKind = 1;
-    noteText = "polling is paused";
+    infoKind = 1;
+    infoText = "polling is paused";
   } else if (!metrics.valid) {
-    noteKind = 1;
-    noteText = "waiting for first poll...";
+    infoKind = 1;
+    infoText = "waiting for first poll...";
   } else if (!metrics.ok) {
-    noteKind = 2;
-    noteText = metrics.error;
+    infoKind = 2;
+    infoText = metrics.error;
+  } else {
+    infoText = "Uptime: " + formatUptime(metrics.uptimeSec);
   }
 
-  if (noteKind != detail_.noteKind || detail_.note.text != noteText || !detail_.note.valid) {
-    tft_.fillRect(10, kDetailNoteY - 2, kScreenW - 20, kScreenH - kDetailNoteY, kPanel);
-    detail_.noteKind = noteKind;
-    detail_.note.text = noteText;
-    detail_.note.color = noteKind == 2 ? kErr : kMuted;
-    detail_.note.valid = true;
+  if (infoKind != detail_.infoKind || detail_.info.text != infoText ||
+      !detail_.info.valid) {
+    tft_.fillRect(kDetailBarX, kDetailInfoClearY, kDetailBarW, kDetailInfoClearH, kPanel);
+    const int infoY = kDetailInfoY + kDetailValueDY;
 
-    if (noteKind == 2) {
-      drawWrapped(tft_, noteText, 10, kDetailNoteY, kScreenW - 10, 2, kErr, kPanel);
-    } else if (noteKind == 1) {
+    if (infoKind == 2) {
+      drawWrapped(tft_, infoText, 10, infoY, kScreenW - 10, 2, kErr, kPanel);
+    } else {
+      const uint16_t color = infoKind == 1 ? kMuted : kText;
       tft_.setTextDatum(TL_DATUM);
-      tft_.setTextColor(kMuted, kPanel);
-      tft_.drawString(noteText, 10, kDetailNoteY, 1);
+      tft_.setTextColor(color, kPanel);
+      tft_.drawString(ellipsize(tft_, infoText, 2, kScreenW - 20), 10, infoY, 2);
     }
+
+    detail_.infoKind = infoKind;
+    detail_.info.text = infoText;
+    detail_.info.valid = true;
   }
 
   tft_.endWrite();

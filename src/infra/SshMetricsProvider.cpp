@@ -6,9 +6,10 @@
 
 namespace {
 
-// Single round trip: CPU usage, load average, memory and root filesystem use.
+// Single round trip: CPU usage, load average, cores, memory, root filesystem
+// use and uptime.
 const char kStatsCommand[] =
-    R"CMD(echo "LOAD:$(cut -d ' ' -f1 /proc/loadavg 2>/dev/null) RAM:$(free -m 2>/dev/null | awk '/Mem:/ {print $3"/"$2"MB"}') DISK:$(df -Pk / 2>/dev/null | awk 'NR==2 {print int($3/1024)"/"int($2/1024)}') CPU:$(a=$(awk '/^cpu /{t=0;for(i=2;i<=9;i++)t+=$i;print t, $5+$6}' /proc/stat 2>/dev/null); sleep 0.3; b=$(awk '/^cpu /{t=0;for(i=2;i<=9;i++)t+=$i;print t, $5+$6}' /proc/stat 2>/dev/null); set -- $a $b; LC_ALL=C awk -v t1=$1 -v i1=$2 -v t2=$3 -v i2=$4 'BEGIN{dt=t2-t1;di=i2-i1;if(dt<=0){printf "0.0";exit}d=dt-di;if(d<0)d=0;printf "%.1f",100*d/dt}')")CMD";
+    R"CMD(echo "LOAD:$(cut -d ' ' -f1 /proc/loadavg 2>/dev/null) RAM:$(free -m 2>/dev/null | awk '/Mem:/ {print $3"/"$2"MB"}') DISK:$(df -Pk / 2>/dev/null | awk 'NR==2 {print int($3/1024)"/"int($2/1024)}') CORES:$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null) UPTIME:$(cut -d ' ' -f1 /proc/uptime 2>/dev/null) CPU:$(a=$(awk '/^cpu /{t=0;for(i=2;i<=9;i++)t+=$i;print t, $5+$6}' /proc/stat 2>/dev/null); sleep 0.3; b=$(awk '/^cpu /{t=0;for(i=2;i<=9;i++)t+=$i;print t, $5+$6}' /proc/stat 2>/dev/null); set -- $a $b; LC_ALL=C awk -v t1=$1 -v i1=$2 -v t2=$3 -v i2=$4 'BEGIN{dt=t2-t1;di=i2-i1;if(dt<=0){printf "0.0";exit}d=dt-di;if(d<0)d=0;printf "%.1f",100*d/dt}')")CMD";
 
 constexpr size_t kMaxOutputBytes = 1024;
 constexpr int kMaxReads = 64;

@@ -20,7 +20,7 @@ a web page, in the serial console, and on an optional ILI9341 TFT panel.
   **git-ignored**) and can be entered on the TFT setup screen, where they are
   saved to NVS.
 - Serial console keeps printing poll results, so headless use still works.
-- Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: three server cards per
+- Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: four server cards per
   page, automatic paging, Wi-Fi/IP status and poll age. The display can be
   compiled out.
 - Three buttons (**A/B/C**) on the TFT build: select a card, open its detail
@@ -82,18 +82,19 @@ The firmware can drive a 2.4" 240x320 ILI9341 SPI module (TJCTM24024-SPI) as a
 local dashboard. It renders the same `MonitorService` snapshots as the web page:
 
 - Header: title plus the device IP (or `WiFi offline`).
-- Three server cards per page: name with `host:port` in brackets, state chip
-  (`OK` / `ERROR` / `WAIT` / `PAUSED`), and one line with CPU, memory and disk
-  usage percentages.
+- Four server cards per page: name with `host:port` in brackets, state chip
+  (`OK` / `ERROR` / `WAIT` / `PAUSED`), and three usage gauges for CPU, memory
+  and disk. Each gauge fills red for the used part and green for the free part,
+  with the percentage written on it in white.
 - Footer: poll interval, `polling...` or the age of the last cycle, and `page x/y`.
-- With more than three servers the view rotates to the next page every 7 s;
+- With more than four servers the view rotates to the next page every 7 s;
   values refresh every 2 s (or immediately when a new poll cycle completes).
 - The panel is initialised before the Wi-Fi association and shows a splash
   screen with the SSID it is about to join, so it is never blank during boot.
-- A full-screen per-server detail view (state, user@host:port, CPU usage, load
-  average, memory with bar, root filesystem usage, poll age/duration and the
-  SSH error text when a poll failed) is opened from Selection mode with
-  button C.
+- A full-screen per-server detail view with four stacked sections: CPU (usage,
+  load average and core count), memory, disk (used/total/percentage with a bar,
+  like memory) and info (host uptime, or the waiting/SSH error message). Opened
+  from Selection mode with button C.
 
 ### Buttons
 
@@ -260,7 +261,7 @@ src/
 │   ├── AppSettings.h            poll interval, SSH timeout
 │   ├── ServerConfig.h           one monitored host (plain data)
 │   ├── ServerMetrics.h          one measurement (plain data)
-│   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. DISK:.. CPU:.."
+│   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. DISK:.. CORES:.. UPTIME:.. CPU:.."
 │   ├── ServerStore.h            persistence port (interface)
 │   ├── ServerRegistry.{h,cpp}   thread-safe server list + settings CRUD
 │   ├── IMetricsProvider.h       metrics transport port (interface)
