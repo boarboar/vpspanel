@@ -21,4 +21,5 @@ class ConsoleView : public MonitorService::Listener {
   void onCycleStarted(size_t serverCount) override;
   void onPollFinished(const ServerConfig& server, const ServerMetrics& metrics) override;
   void onCycleFinished(size_t polledCount, uint32_t durationMs) override;
+  void onPingFinished(const ServerConfig& server, const PingResult& ping) override;
 };

@@ -48,8 +48,8 @@ void ConsoleView::printConfiguration(const std::vector<ServerConfig>& servers,
   Serial.printf("Storage: %s\n",
                 loadedFromStore ? "configuration loaded from flash (NVS)"
                                 : "no saved configuration, using defaults + empty server list");
-  Serial.printf("Settings: poll every %u s, SSH timeout %u s\n",
-                settings.pollIntervalSec, settings.sshTimeoutSec);
+  Serial.printf("Settings: SSH poll every %u s, ping every %u s, SSH timeout %u s\n",
+                settings.sshIntervalSec, settings.pingIntervalSec, settings.sshTimeoutSec);
   Serial.printf("Servers: %u configured (max %u)\n",
                 static_cast<unsigned>(servers.size()),
                 static_cast<unsigned>(ServerRegistry::kMaxServers));
@@ -98,4 +98,15 @@ void ConsoleView::onPollFinished(const ServerConfig& server, const ServerMetrics
 void ConsoleView::onCycleFinished(size_t polledCount, uint32_t durationMs) {
   Serial.printf("[poll] done: %u server(s) in %u ms\n\n",
                 static_cast<unsigned>(polledCount), static_cast<unsigned>(durationMs));
+}
+
+void ConsoleView::onPingFinished(const ServerConfig& server, const PingResult& ping) {
+  if (ping.reachable) {
+    Serial.printf("[ping] %s (%s) %s ms\n", server.displayName().c_str(),
+                  server.endpoint().c_str(), formatValue(ping.rttMs, 0).c_str());
+    return;
+  }
+
+  Serial.printf("[ping] %s (%s) unreachable: %s\n", server.displayName().c_str(),
+                server.endpoint().c_str(), ping.error.c_str());
 }

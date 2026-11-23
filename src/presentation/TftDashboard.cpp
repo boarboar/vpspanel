@@ -43,8 +43,19 @@ constexpr int kGaugeH = 10;
 constexpr int kGaugeGap = 6;
 constexpr int kGaugeCount = 3;
 
+// First row of a card: title on the left, then the ping state and the SSH
+// state. Ping and chip use font 1, which keeps nearly the full card width for
+// the title while still fitting at the right edge.
+constexpr int kCardPingRight = kCardW - 62;
+constexpr int kCardPingClearX = kCardW - 118;
+constexpr int kCardPingClearW = 56;
+constexpr int kCardChipClearX = kCardW - 54;
+constexpr int kCardChipClearW = 44;
+constexpr int kCardTitleMaxWidth = kCardW - 136;
+
 static_assert(kGaugeLabelY >= 20, "gauge labels must stay below the title row");
 static_assert(kGaugeY + kGaugeH <= kCardH - 2, "usage gauges must fit inside a card");
+static_assert(kCardTitleMaxWidth > 100, "the card title needs a usable width");
 
 // How often the panel contents are re-evaluated. Actual SPI traffic only
 // happens for fields whose value or colour changed in the meantime.
@@ -76,6 +87,11 @@ constexpr int kDetailBarH = 6;
 constexpr int kDetailGaugeDY = 31;
 constexpr int kDetailInfoClearY = 204;
 constexpr int kDetailInfoClearH = 26;
+
+// Ping state shares the endpoint row of the identity section.
+constexpr int kDetailPingClearX = kScreenW - 114;
+constexpr int kDetailPingClearW = 104;
+constexpr int kDetailEndpointMaxWidth = 190;
 
 static_assert(kDetailInfoY + kDetailSectionH <= kScreenH, "detail sections must fit");
 static_assert(kDetailGaugeDY + kDetailBarH < kDetailSectionH, "detail bars must fit");
@@ -181,6 +197,48 @@ String formatUptime(float seconds) {
   if (hours > 0) return String(hours) + "h " + String(minutes) + "m";
   if (minutes > 0) return String(minutes) + "m " + String(secs) + "s";
   return String(secs) + "s";
+}
+
+// Round trip time in whole milliseconds (the lwIP ping session reports
+// millisecond resolution).
+String formatRtt(float rttMs) {
+  if (isnan(rttMs) || rttMs < 0) return "--";
+  return String(static_cast<int>(lroundf(rttMs)));
+}
+
+// Compact first-row form: "OK 12ms", "DOWN", "..." while waiting, "n/a" when
+// the server is paused.
+void formatPingShort(const PingResult& ping, bool enabled, String& text, uint16_t& color) {
+  if (!enabled) {
+    text = "n/a";
+    color = kMuted;
+  } else if (!ping.valid) {
+    text = "...";
+    color = kMuted;
+  } else if (ping.reachable) {
+    text = "OK " + formatRtt(ping.rttMs) + "ms";
+    color = kOk;
+  } else {
+    text = "DOWN";
+    color = kErr;
+  }
+}
+
+// Detail-section form: "PING 12 ms", "PING DOWN", ...
+void formatPingLong(const PingResult& ping, bool enabled, String& text, uint16_t& color) {
+  if (!enabled) {
+    text = "PING n/a";
+    color = kMuted;
+  } else if (!ping.valid) {
+    text = "PING ...";
+    color = kMuted;
+  } else if (ping.reachable) {
+    text = "PING " + formatRtt(ping.rttMs) + " ms";
+    color = kOk;
+  } else {
+    text = "PING DOWN";
+    color = kErr;
+  }
 }
 
 // Gauge fills are a little deeper than kErr/kOk so the white percentage text
@@ -449,7 +507,7 @@ void TftDashboard::updateHeader() {
 
 void TftDashboard::updateFooter(size_t pages) {
   const uint16_t color =
-      monitor_.isPolling() ? kWarn : (selecting_ ? kSelected : kMuted);
+      (monitor_.isPolling() || monitor_.isPinging()) ? kWarn : (selecting_ ? kSelected : kMuted);
   const String left = ellipsize(tft_, footerText(), 1, 232);
   drawField(footerLeft_, left, 8, kFooterY + 4, 1, color, 8 + 232);
 
@@ -488,17 +546,24 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     cache.selected = selected;
   }
 
-  // ---- fixed top row: name followed by "host:port" in brackets ------------
+  // ---- fixed top row: name/host, ping state and SSH state ------------------
   const String suffix = " (" + server.endpoint() + ")";
   const int suffixWidth = tft_.textWidth(suffix, 2);
   String title;
-  if (suffixWidth < 194) {
-    title = ellipsize(tft_, server.displayName(), 2, 194 - suffixWidth) + suffix;
+  if (suffixWidth + 30 <= kCardTitleMaxWidth) {
+    title = ellipsize(tft_, server.displayName(), 2, kCardTitleMaxWidth - suffixWidth) + suffix;
   } else {
-    // Pathological host name: keep the endpoint readable instead.
-    title = ellipsize(tft_, server.endpoint(), 2, 194);
+    // Not enough room for the endpoint: keep the (usually shorter) name
+    // readable instead; the full endpoint is on the detail screen.
+    title = ellipsize(tft_, server.displayName(), 2, kCardTitleMaxWidth);
   }
-  drawField(cache.name, title, x + 10, y + 4, 2, kText, x + 204);
+  drawField(cache.name, title, x + 10, y + 4, 2, kText, x + 10 + kCardTitleMaxWidth);
+
+  String pingText;
+  uint16_t pingColor = kMuted;
+  formatPingShort(snapshot.ping, server.enabled, pingText, pingColor);
+  drawRightField(cache.ping, pingText, x + kCardPingRight, y + 8, x + kCardPingClearX,
+                 kCardPingClearW, 1, pingColor);
 
   uint16_t chipColor = kMuted;
   const char* chip = "WAIT";
@@ -511,7 +576,8 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
     chipColor = kErr;
     chip = "ERROR";
   }
-  drawRightField(cache.chip, chip, x + kCardW - 10, y + 4, x + 220, 82, 2, chipColor);
+  drawRightField(cache.chip, chip, x + kCardW - 10, y + 8, x + kCardChipClearX,
+                 kCardChipClearW, 1, chipColor);
 
   // ---- body: layout may change between waiting/error/metrics -------------
   CardLayout layout = CardLayout::Waiting;
@@ -652,9 +718,12 @@ void TftDashboard::drawRightField(TextField& field, const String& value, int rig
 String TftDashboard::footerText() const {
   if (selecting_) return "A/B: card | C: details";
 
-  String text = "poll " + String(registry_.settings().pollIntervalSec) + "s";
+  const AppSettings settings = registry_.settings();
+  String text = "ssh " + String(settings.sshIntervalSec) + "s / ping " +
+                String(settings.pingIntervalSec) + "s";
 
   if (monitor_.isPolling()) return text + " | polling...";
+  if (monitor_.isPinging()) return text + " | pinging...";
 
   const uint32_t last = monitor_.lastCycleAtMs();
   if (last == 0) return text + " | waiting for data";
@@ -863,16 +932,39 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
 
   String endpoint = server.user.length() > 0 ? server.user + "@" + server.endpoint()
                                              : server.endpoint();
-  endpoint = ellipsize(tft_, endpoint, 1, kScreenW - 20);
-  drawField(detail_.endpoint, endpoint, 10, 58, 1, kMuted, kScreenW - 10);
+  endpoint = ellipsize(tft_, endpoint, 1, kDetailEndpointMaxWidth);
+  drawField(detail_.endpoint, endpoint, 10, 58, 1, kMuted, kDetailPingClearX - 6);
 
-  // ---- CPU: usage, load average and core count ---------------------------
+  String pingText;
+  uint16_t pingColor = kMuted;
+  formatPingLong(snapshot.ping, server.enabled, pingText, pingColor);
+  drawRightField(detail_.ping, pingText, kScreenW - 10, 58, kDetailPingClearX,
+                 kDetailPingClearW, 1, pingColor);
+
+  // ---- CPU: usage gauge, load average and core count ---------------------
   const int cpuY = kDetailCpuY + kDetailValueDY;
   if (!isnan(metrics.cpuPercent)) {
-    const String cpu = String(static_cast<int>(lroundf(metrics.cpuPercent))) + "%";
+    const float percent = metrics.cpuPercent;
+    const String cpu = String(static_cast<int>(lroundf(percent))) + "%";
     drawField(detail_.cpu, cpu, 10, cpuY, 2, kAccent, 90);
+
+    int filled = static_cast<int>(kDetailBarW * percent / 100.0f + 0.5f);
+    filled = filled < 0 ? 0 : (filled > kDetailBarW ? kDetailBarW : filled);
+    const uint16_t color = percent >= 90 ? kErr : kAccent;
+    if (filled != detail_.cpuBarFilled || color != detail_.cpuBarColor) {
+      drawBar(tft_, kDetailBarX, kDetailCpuY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+              percent, color);
+      detail_.cpuBarFilled = filled;
+      detail_.cpuBarColor = color;
+    }
   } else {
     drawField(detail_.cpu, "n/a", 10, cpuY, 2, kMuted, 90);
+    if (detail_.cpuBarFilled >= 0) {
+      tft_.fillRect(kDetailBarX, kDetailCpuY + kDetailGaugeDY, kDetailBarW, kDetailBarH,
+                    kPanel);
+      detail_.cpuBarFilled = -1;
+      detail_.cpuBarColor = 0;
+    }
   }
 
   String loadText;

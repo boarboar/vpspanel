@@ -2,7 +2,9 @@
 
 An ESP32-C3 dashboard that polls a configurable list of Linux servers over SSH
 and shows CPU usage, load average, memory usage and root filesystem usage — on
-a web page, in the serial console, and on an optional ILI9341 TFT panel.
+a web page, in the serial console, and on an optional ILI9341 TFT panel. A
+separate ICMP ping loop adds reachability and round trip time on its own,
+independent schedule.
 
 > Based on the original single-server sketch. Polling now runs on its own
 > FreeRTOS task, configuration lives in flash (NVS), and the code is split into
@@ -11,6 +13,9 @@ a web page, in the serial console, and on an optional ILI9341 TFT panel.
 ## Features
 
 - Polls **any number of hosts** (up to 16), one SSH command per host per cycle.
+- Independent **ICMP ping loop** (reachability plus round trip time) with its own
+  interval: 15 s by default, while the SSH metrics poll every 60 s. Either
+  interval can be changed without affecting the other.
 - Web dashboard at `http://<device-ip>/` with auto-refresh (5 s) and a
   "Poll now" button.
 - Server list and polling settings are managed at `http://<device-ip>/servers`.
@@ -66,12 +71,12 @@ If you connect the optional TFT panel, wire it as described in
 
 ## Web UI
 
-| Page              | Purpose                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| `/`               | Live metrics: status, CPU, load, memory (with bar), disk usage |
-| `/servers`        | Add / edit / delete servers, pause polling, change intervals   |
-| `/api/metrics`    | JSON snapshot used by the dashboard                           |
-| `/api/poll`       | `POST` to request an immediate polling cycle                  |
+| Page              | Purpose                                                              |
+| ----------------- | -------------------------------------------------------------------- |
+| `/`               | Live metrics: ping, status, CPU, load, memory (with bar), disk usage |
+| `/servers`        | Add / edit / delete servers, pause polling, change intervals          |
+| `/api/metrics`    | JSON snapshot used by the dashboard                                  |
+| `/api/poll`       | `POST` to request an immediate SSH and ping cycle                    |
 
 Server entries can be **paused** instead of deleted; paused hosts keep their
 last measurement and are skipped by the poller.
@@ -82,19 +87,21 @@ The firmware can drive a 2.4" 240x320 ILI9341 SPI module (TJCTM24024-SPI) as a
 local dashboard. It renders the same `MonitorService` snapshots as the web page:
 
 - Header: title plus the device IP (or `WiFi offline`).
-- Four server cards per page: name with `host:port` in brackets, state chip
-  (`OK` / `ERROR` / `WAIT` / `PAUSED`), and three usage gauges for CPU, memory
-  and disk. Each gauge fills red for the used part and green for the free part,
-  with the percentage written on it in white.
-- Footer: poll interval, `polling...` or the age of the last cycle, and `page x/y`.
+- Four server cards per page: name with `host:port` in brackets, ping state and
+  RTT (`OK 12ms` / `DOWN`), state chip (`OK` / `ERROR` / `WAIT` / `PAUSED`), and
+  three usage gauges for CPU, memory and disk. Each gauge fills red for the used
+  part and green for the free part, with the percentage written on it in white.
+- Footer: both poll intervals (`ssh 60s / ping 15s`), `polling...`/`pinging...`
+  or the age of the last SSH cycle, and `page x/y`.
 - With more than four servers the view rotates to the next page every 7 s;
-  values refresh every 2 s (or immediately when a new poll cycle completes).
+  values refresh every second (or immediately when a new poll cycle completes).
 - The panel is initialised before the Wi-Fi association and shows a splash
   screen with the SSID it is about to join, so it is never blank during boot.
-- A full-screen per-server detail view with four stacked sections: CPU (usage,
-  load average and core count), memory, disk (used/total/percentage with a bar,
-  like memory) and info (host uptime, or the waiting/SSH error message). Opened
-  from Selection mode with button C.
+- A full-screen per-server detail view with four stacked sections: the identity
+  block (name, state, endpoint and ping reachability/RTT), CPU (usage with a
+  bar, load average and core count), memory, disk (used/total/percentage with a
+  bar, like memory) and info (host uptime, or the waiting/SSH error message).
+  Opened from Selection mode with button C.
 
 ### Buttons
 
@@ -258,18 +265,21 @@ src/
 │   ├── wifi_credentials.example.h   template (committed)
 │   └── wifi_credentials.h           real credentials (git-ignored)
 ├── domain/                      business logic, no Arduino UI/HTTP/storage code
-│   ├── AppSettings.h            poll interval, SSH timeout
+│   ├── AppSettings.h            SSH/ping intervals, SSH timeout
 │   ├── ServerConfig.h           one monitored host (plain data)
-│   ├── ServerMetrics.h          one measurement (plain data)
+│   ├── ServerMetrics.h          one SSH measurement (plain data)
+│   ├── PingResult.h             one ICMP reachability measurement (plain data)
 │   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. DISK:.. CORES:.. UPTIME:.. CPU:.."
 │   ├── ServerStore.h            persistence port (interface)
 │   ├── ServerRegistry.{h,cpp}   thread-safe server list + settings CRUD
-│   ├── IMetricsProvider.h       metrics transport port (interface)
+│   ├── IMetricsProvider.h       SSH metrics transport port (interface)
+│   ├── IPingProvider.h          ICMP ping transport port (interface)
 │   └── MonitorService.{h,cpp}   scheduling, polling, latest results
 ├── infra/                       concrete adapters for the outside world
 │   ├── NvsServerStore.{h,cpp}   JSON config in the NVS flash partition
 │   ├── NvsWifiCredentialStore.{h,cpp}  Wi-Fi credentials in NVS
 │   ├── SshMetricsProvider.{h,cpp}  LibSSH-ESP32 implementation
+│   ├── PingProvider.{h,cpp}     lwIP ICMP echo implementation
 │   ├── ButtonInput.{h,cpp}      debounced A/B/C button presses
 │   └── StatusLed.{h,cpp}        built-in LED: Wi-Fi + polling feedback
 └── presentation/                output only, talks to the domain services
@@ -297,8 +307,11 @@ different presentation (MQTT, display, etc.) only needs to observe
 
 - **Loop task** — runs the web server and Wi-Fi supervision. `SET_LOOP_TASK_STACK_SIZE`
   is set to 16 KB.
-- **Polling task** — dedicated 40 KB stack for libssh/mbedTLS. It calls
+- **SSH polling task** — dedicated 40 KB stack for libssh/mbedTLS. It calls
   `libssh_begin()` once and then polls when `MonitorService::pollDue()` says so.
+- **Ping task** — separate 8 KB task that calls `MonitorService::pingAll()` when
+  `pingDue()` says so. It never waits for SSH, so reachability and RTT keep
+  updating while an SSH poll is blocked on a slow host.
 - **Display task** — 10 KB stack (only when `VPSPANEL_HAS_DISPLAY = 1`). It
   redraws the TFT at its own pace, polls the A/B/C buttons and never touches the
   network. The panel is initialised from `setup()` before Wi-Fi, then handed
@@ -314,7 +327,7 @@ different presentation (MQTT, display, etc.) only needs to observe
 | ----------------------------- | ---------------------------------------------------- |
 | Server list, poll settings    | NVS namespace `vpspanel`, key `config` (JSON blob)    |
 | Wi-Fi SSID/password, hostname | `src/config/wifi_credentials.h` (git-ignored)         |
-| Latest metrics                | RAM, per server (`MonitorService`)                    |
+| Latest metrics and pings      | RAM, per server (`MonitorService`)                    |
 
 Notes:
 
@@ -346,7 +359,7 @@ keep the device on a trusted network, and do not expose port 80 to the internet.
   VPS Monitor - ESP32 SSH dashboard
 ========================================
 Storage: configuration loaded from flash (NVS)
-Settings: poll every 15 s, SSH timeout 10 s
+Settings: SSH poll every 60 s, ping every 15 s, SSH timeout 10 s
 Servers: 2 configured (max 16)
   1. vps-1  192.168.1.10:22  user=monitor  enabled
   2. vps-2  example.com:2222  user=root  paused
@@ -354,6 +367,7 @@ Wi-Fi: connected, IP 192.168.1.50
 Web UI: http://192.168.1.50/
 mDNS: http://vpspanel.local/
 Free heap: 245000 bytes
+[ping] vps-1 (192.168.1.10:22) 4 ms
 [poll] checking 2 server(s)
 [ ok ] vps-1 (192.168.1.10:22) cpu=12.5% load=0.15 mem=143/7951 MB disk=4123/40258 MB (10%) (812 ms)
 [poll] done: 1 server(s) in 838 ms
@@ -361,9 +375,12 @@ Free heap: 245000 bytes
 
 ## Tuning
 
-- `kPollTaskStack` in `src/main.cpp` — increase if SSH crashes with stack
-  overflow (LibSSH's own exec example uses 51 KB).
-- Poll interval 5–3600 s, SSH timeout 2–60 s (editable on the web page).
+- `kPollTaskStack` / `kPingTaskStack` in `src/main.cpp` — increase the SSH stack
+  if SSH crashes with stack overflow (LibSSH's own exec example uses 51 KB).
+- SSH poll interval 5–3600 s, ping interval 5–3600 s, SSH timeout 2–60 s
+  (editable on the web page). The two intervals are independent.
+- The ping probe uses one ICMP echo with a 1 s reply timeout
+  (`src/infra/PingProvider.cpp`).
 - The remote command is a single line in
   `src/infra/SshMetricsProvider.cpp`; extend the parser in
   `src/domain/MetricsParser.cpp` if you add metrics.

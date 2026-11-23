@@ -28,8 +28,15 @@ bool NvsServerStore::load(AppSettings& settings, std::vector<ServerConfig>& serv
   if (deserializeJson(doc, payload) != DeserializationError::Ok) return false;
 
   JsonObject settingsObj = doc["settings"].as<JsonObject>();
-  if (!settingsObj["pollSec"].isNull()) {
-    settings.pollIntervalSec = settingsObj["pollSec"].as<uint16_t>();
+  // "pollSec" is the key used before ping polling existed; it still describes
+  // the SSH metrics interval, so older saved configurations keep working.
+  if (!settingsObj["sshSec"].isNull()) {
+    settings.sshIntervalSec = settingsObj["sshSec"].as<uint16_t>();
+  } else if (!settingsObj["pollSec"].isNull()) {
+    settings.sshIntervalSec = settingsObj["pollSec"].as<uint16_t>();
+  }
+  if (!settingsObj["pingSec"].isNull()) {
+    settings.pingIntervalSec = settingsObj["pingSec"].as<uint16_t>();
   }
   if (!settingsObj["sshTimeoutSec"].isNull()) {
     settings.sshTimeoutSec = settingsObj["sshTimeoutSec"].as<uint16_t>();
@@ -57,7 +64,8 @@ bool NvsServerStore::save(const AppSettings& settings,
   doc["version"] = kSchemaVersion;
 
   JsonObject settingsObj = doc["settings"].to<JsonObject>();
-  settingsObj["pollSec"] = settings.pollIntervalSec;
+  settingsObj["sshSec"] = settings.sshIntervalSec;
+  settingsObj["pingSec"] = settings.pingIntervalSec;
   settingsObj["sshTimeoutSec"] = settings.sshTimeoutSec;
 
   JsonArray array = doc["servers"].to<JsonArray>();

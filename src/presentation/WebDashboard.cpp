@@ -222,13 +222,15 @@ void WebDashboard::handleServersPage() {
 
   content += F("<h2>Polling</h2>");
   content += F("<form class=\"card form\" method=\"post\" action=\"/settings\">");
-  content += textField("Poll interval (seconds)", "pollSec", String(settings.pollIntervalSec), "",
+  content += textField("SSH poll interval (seconds)", "sshSec", String(settings.sshIntervalSec), "",
+                       "number", "min=\"5\" max=\"3600\" required");
+  content += textField("Ping interval (seconds)", "pingSec", String(settings.pingIntervalSec), "",
                        "number", "min=\"5\" max=\"3600\" required");
   content += textField("SSH timeout (seconds)", "timeoutSec", String(settings.sshTimeoutSec), "",
                        "number", "min=\"2\" max=\"60\" required");
   content += F("<div class=\"form-actions\"><button type=\"submit\">Save settings</button>"
-               "<span class=\"muted\">Changes apply from the next polling cycle.</span>"
-               "</div></form>");
+               "<span class=\"muted\">The two intervals are independent and apply from the "
+               "next cycle.</span></div></form>");
 
   server_.send(200, "text/html; charset=utf-8",
                renderPage(F("Servers"), F("servers"), content));
@@ -273,6 +275,7 @@ void WebDashboard::handleSaveServer() {
     error = "Could not save the server (limit is 16 servers, or the flash write failed)";
   } else if (error.length() == 0) {
     monitor_.requestPoll();
+    monitor_.requestPing();
   }
 
   redirectTo(String("/servers?msg=") +
@@ -296,23 +299,29 @@ void WebDashboard::handleDeleteServer() {
 }
 
 void WebDashboard::handleSaveSettings() {
-  const long pollSec = server_.arg("pollSec").toInt();
+  const long sshSec = server_.arg("sshSec").toInt();
+  const long pingSec = server_.arg("pingSec").toInt();
   const long timeoutSec = server_.arg("timeoutSec").toInt();
 
   String error;
-  if (pollSec < AppSettings::kMinPollIntervalSec || pollSec > AppSettings::kMaxPollIntervalSec) {
-    error = "Poll interval must be between 5 and 3600 seconds";
+  if (sshSec < AppSettings::kMinSshIntervalSec || sshSec > AppSettings::kMaxSshIntervalSec) {
+    error = "SSH poll interval must be between 5 and 3600 seconds";
+  } else if (pingSec < AppSettings::kMinPingIntervalSec ||
+             pingSec > AppSettings::kMaxPingIntervalSec) {
+    error = "Ping interval must be between 5 and 3600 seconds";
   } else if (timeoutSec < AppSettings::kMinSshTimeoutSec ||
              timeoutSec > AppSettings::kMaxSshTimeoutSec) {
     error = "SSH timeout must be between 2 and 60 seconds";
   } else {
     AppSettings settings;
-    settings.pollIntervalSec = static_cast<uint16_t>(pollSec);
+    settings.sshIntervalSec = static_cast<uint16_t>(sshSec);
+    settings.pingIntervalSec = static_cast<uint16_t>(pingSec);
     settings.sshTimeoutSec = static_cast<uint16_t>(timeoutSec);
     if (!registry_.updateSettings(settings)) {
       error = "Could not save the settings (flash write failed)";
     } else {
       monitor_.requestPoll();
+      monitor_.requestPing();
     }
   }
 
@@ -325,14 +334,20 @@ void WebDashboard::handleApiMetrics() {
   const uint32_t lastCycleAt = monitor_.lastCycleAtMs();
 
   JsonDocument doc;
-  doc["intervalSec"] = settings.pollIntervalSec;
+  doc["intervalSec"] = settings.sshIntervalSec;
+  doc["sshIntervalSec"] = settings.sshIntervalSec;
+  doc["pingIntervalSec"] = settings.pingIntervalSec;
   doc["sshTimeoutSec"] = settings.sshTimeoutSec;
   doc["polling"] = monitor_.isPolling();
+  doc["pinging"] = monitor_.isPinging();
   doc["lastCycleAgeMs"] = lastCycleAt == 0 ? -1 : static_cast<int32_t>(now - lastCycleAt);
+  const uint32_t lastPingAt = monitor_.lastPingCycleAtMs();
+  doc["lastPingAgeMs"] = lastPingAt == 0 ? -1 : static_cast<int32_t>(now - lastPingAt);
 
   JsonArray array = doc["servers"].to<JsonArray>();
   for (const auto& snapshot : monitor_.snapshots()) {
     const ServerMetrics& metrics = snapshot.metrics;
+    const PingResult& ping = snapshot.ping;
     JsonObject obj = array.add<JsonObject>();
     obj["id"] = snapshot.server.id;
     obj["name"] = snapshot.server.displayName();
@@ -349,10 +364,14 @@ void WebDashboard::handleApiMetrics() {
     obj["diskTotal"] = metrics.diskTotalMb;
     obj["ageMs"] = metrics.valid ? static_cast<int32_t>(now - metrics.polledAtMs) : -1;
     obj["durationMs"] = metrics.durationMs;
+    obj["pingOk"] = ping.valid && ping.reachable;
+    obj["pingMs"] = ping.rttMs;
+    obj["pingError"] = ping.error;
+    obj["pingAgeMs"] = ping.valid ? static_cast<int32_t>(now - ping.polledAtMs) : -1;
   }
 
   String payload;
-  payload.reserve(256 + doc["servers"].size() * 220);
+  payload.reserve(256 + doc["servers"].size() * 260);
   serializeJson(doc, payload);
 
   server_.sendHeader("Cache-Control", "no-store");
@@ -361,6 +380,7 @@ void WebDashboard::handleApiMetrics() {
 
 void WebDashboard::handleApiPoll() {
   monitor_.requestPoll();
+  monitor_.requestPing();
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(202, "application/json", F("{\"queued\":true}"));
 }

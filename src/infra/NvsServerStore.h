@@ -12,5 +12,5 @@ class NvsServerStore : public ServerStore {
  private:
   static constexpr const char* kNamespace = "vpspanel";
   static constexpr const char* kKey = "config";
-  static constexpr uint16_t kSchemaVersion = 1;
+  static constexpr uint16_t kSchemaVersion = 2;
 };

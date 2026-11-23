@@ -86,6 +86,7 @@ class TftDashboard {
     CardLayout layout = CardLayout::None;
     TextField name;
     TextField chip;
+    TextField ping;        // "OK 12ms" / "DOWN"
     GaugeCache gauges[3];  // CPU, MEM, DISK
     TextField note;        // "waiting for first poll..." / "polling is paused"
     TextField error;
@@ -99,6 +100,7 @@ class TftDashboard {
     TextField name;
     TextField chip;
     TextField endpoint;
+    TextField ping;   // reachability and round trip time
     TextField cpu;    // percentage
     TextField load;   // "LA 1.24"
     TextField cores;  // "8 cores"
@@ -106,6 +108,8 @@ class TftDashboard {
     TextField disk;
     TextField info;   // uptime, or the waiting/error message
     uint8_t infoKind = 0;  // 0 = uptime, 1 = muted note, 2 = error
+    int cpuBarFilled = -1;
+    uint16_t cpuBarColor = 0;
     int barFilled = -1;
     uint16_t barColor = 0;
     int diskBarFilled = -1;

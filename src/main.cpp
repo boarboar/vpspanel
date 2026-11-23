@@ -15,6 +15,7 @@
 #include "domain/ServerRegistry.h"
 #include "infra/NvsServerStore.h"
 #include "infra/NvsWifiCredentialStore.h"
+#include "infra/PingProvider.h"
 #include "infra/SshMetricsProvider.h"
 #include "infra/StatusLed.h"
 #include "presentation/ConsoleView.h"
@@ -32,6 +33,8 @@ namespace {
 
 constexpr uint32_t kPollTaskStack = 40 * 1024;
 constexpr UBaseType_t kPollTaskPriority = 1;
+constexpr uint32_t kPingTaskStack = 8 * 1024;
+constexpr UBaseType_t kPingTaskPriority = 1;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
 constexpr uint32_t kWifiRetryIntervalMs = 15000;
 
@@ -41,7 +44,8 @@ NvsServerStore serverStore;
 NvsWifiCredentialStore wifiCredentials;
 ServerRegistry registry(serverStore);
 SshMetricsProvider metricsProvider;
-MonitorService monitor(registry, metricsProvider);
+PingProvider pingProvider;
+MonitorService monitor(registry, metricsProvider, pingProvider);
 ConsoleView consoleView;
 WebDashboard webDashboard(registry, monitor);
 TftDashboard tftDashboard(monitor, registry);
@@ -53,6 +57,7 @@ String wifiSsid = WIFI_SSID;
 String wifiPassword = WIFI_PASSWORD;
 
 TaskHandle_t pollTaskHandle = nullptr;
+TaskHandle_t pingTaskHandle = nullptr;
 uint32_t lastWifiAttemptMs = 0;
 bool wifiWasConnected = false;
 bool mdnsStarted = false;
@@ -185,6 +190,7 @@ void maintainWifi() {
       startMdns();
       wifiWasConnected = true;
       monitor.requestPoll();
+      monitor.requestPing();
     }
     return;
   }
@@ -215,6 +221,19 @@ void pollTask(void*) {
       }
     }
     vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
+// ICMP pings have their own task and schedule, so a slow SSH cycle (or a host
+// whose SSH port hangs) never delays reachability updates.
+void pingTask(void*) {
+  for (;;) {
+    if (!tftDashboard.isSetupOpen()) {
+      if (WiFi.status() == WL_CONNECTED && monitor.pingDue()) {
+        monitor.pingAll();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -292,6 +311,11 @@ void setup() {
                   &pollTaskHandle) != pdPASS) {
     Serial.println(F("FATAL: could not start the polling task"));
   }
+
+  if (xTaskCreate(pingTask, "vps-ping", kPingTaskStack, nullptr, kPingTaskPriority,
+                  &pingTaskHandle) != pdPASS) {
+    Serial.println(F("FATAL: could not start the ping task"));
+  }
 }
 
 void loop() {
@@ -304,7 +328,7 @@ void loop() {
   }
 
   statusLed.setWifiConnecting(!setupOpen && WiFi.status() != WL_CONNECTED);
-  statusLed.setPolling(!setupOpen && monitor.isPolling());
+  statusLed.setPolling(!setupOpen && (monitor.isPolling() || monitor.isPinging()));
   statusLed.update();
 
   delay(2);

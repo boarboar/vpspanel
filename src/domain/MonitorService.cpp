@@ -11,8 +11,9 @@ uint32_t markMillis() {
 
 }  // namespace
 
-MonitorService::MonitorService(ServerRegistry& registry, IMetricsProvider& provider)
-    : registry_(registry), provider_(provider) {}
+MonitorService::MonitorService(ServerRegistry& registry, IMetricsProvider& provider,
+                               IPingProvider& pingProvider)
+    : registry_(registry), provider_(provider), pingProvider_(pingProvider) {}
 
 void MonitorService::begin() {
   if (mutex_ == nullptr) {
@@ -30,7 +31,7 @@ bool MonitorService::pollDue() {
   const uint32_t now = millis();
   if (lastCycleAtMs_ == 0) return true;
 
-  const uint32_t intervalMs = static_cast<uint32_t>(registry_.settings().pollIntervalSec) * 1000UL;
+  const uint32_t intervalMs = static_cast<uint32_t>(registry_.settings().sshIntervalSec) * 1000UL;
   return (now - lastCycleAtMs_) >= intervalMs;
 }
 
@@ -44,6 +45,28 @@ bool MonitorService::isPolling() const {
 
 uint32_t MonitorService::lastCycleAtMs() const {
   return lastCycleAtMs_;
+}
+
+bool MonitorService::pingDue() {
+  if (immediatePingRequest_.exchange(false)) return true;
+
+  const uint32_t now = millis();
+  if (lastPingCycleAtMs_ == 0) return true;
+
+  const uint32_t intervalMs = static_cast<uint32_t>(registry_.settings().pingIntervalSec) * 1000UL;
+  return (now - lastPingCycleAtMs_) >= intervalMs;
+}
+
+void MonitorService::requestPing() {
+  immediatePingRequest_.store(true);
+}
+
+bool MonitorService::isPinging() const {
+  return pinging_.load();
+}
+
+uint32_t MonitorService::lastPingCycleAtMs() const {
+  return lastPingCycleAtMs_;
 }
 
 void MonitorService::pollAll() {
@@ -100,6 +123,54 @@ void MonitorService::pollAll() {
   if (listener_) listener_->onCycleFinished(polled, millis() - cycleStart);
 }
 
+void MonitorService::pingAll() {
+  pinging_.store(true);
+
+  const std::vector<ServerConfig> servers = registry_.servers();
+  const uint32_t cycleStart = millis();
+
+  if (listener_) listener_->onPingCycleStarted(servers.size());
+
+  size_t polled = 0;
+  for (const auto& server : servers) {
+    if (!server.enabled) continue;
+
+    PingResult ping = pingProvider_.ping(server);
+    ping.polledAtMs = markMillis();
+
+    {
+      Guard guard(mutex_);
+      pings_[server.id] = ping;
+    }
+
+    if (listener_) listener_->onPingFinished(server, ping);
+    ++polled;
+
+    // The ICMP probes are cheap, but yielding keeps the web server responsive.
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+
+  // Drop probes of servers that were removed from the configuration.
+  {
+    std::set<String> knownIds;
+    for (const auto& server : servers) knownIds.insert(server.id);
+
+    Guard guard(mutex_);
+    for (auto it = pings_.begin(); it != pings_.end();) {
+      if (knownIds.count(it->first) == 0) {
+        it = pings_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  lastPingCycleAtMs_ = markMillis();
+  pinging_.store(false);
+
+  if (listener_) listener_->onPingCycleFinished(polled, millis() - cycleStart);
+}
+
 std::vector<MonitorService::Snapshot> MonitorService::snapshots() const {
   const std::vector<ServerConfig> servers = registry_.servers();
   std::vector<Snapshot> result;
@@ -109,10 +180,17 @@ std::vector<MonitorService::Snapshot> MonitorService::snapshots() const {
   for (const auto& server : servers) {
     Snapshot snapshot;
     snapshot.server = server;
-    auto it = metrics_.find(server.id);
-    if (it != metrics_.end()) {
-      snapshot.metrics = it->second;
+
+    auto metricsIt = metrics_.find(server.id);
+    if (metricsIt != metrics_.end()) {
+      snapshot.metrics = metricsIt->second;
     }
+
+    auto pingIt = pings_.find(server.id);
+    if (pingIt != pings_.end()) {
+      snapshot.ping = pingIt->second;
+    }
+
     result.push_back(snapshot);
   }
   return result;

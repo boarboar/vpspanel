@@ -72,8 +72,8 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
 <div class="card">
   <table>
     <thead><tr>
-      <th>Server</th><th>Status</th><th>CPU</th><th>Load 1m</th><th>Memory</th><th>Disk /</th>
-      <th class="hide-sm">Last poll</th>
+      <th>Server</th><th>Status</th><th>Ping</th><th>CPU</th><th>Load 1m</th><th>Memory</th>
+      <th>Disk /</th><th class="hide-sm">Last poll</th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -148,6 +148,28 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     return td;
   }
 
+  function pingCell(server) {
+    var td = document.createElement('td');
+    var chip = document.createElement('span');
+    var cls = 'idle';
+    var label = 'Pending';
+    if (!server.enabled) {
+      label = 'Paused';
+    } else if (!isNumber(server.pingAgeMs) || server.pingAgeMs < 0) {
+      label = 'Pending';
+    } else if (server.pingOk) {
+      cls = 'ok';
+      label = (isNumber(server.pingMs) ? Math.round(server.pingMs) : 0) + ' ms';
+    } else {
+      cls = 'err';
+      label = 'Unreachable';
+    }
+    chip.className = 'chip ' + cls;
+    chip.textContent = label;
+    td.appendChild(chip);
+    return td;
+  }
+
   function cpuCell(server) {
     var td = document.createElement('td');
     if (!isNumber(server.cpu)) {
@@ -213,6 +235,7 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
       var tr = document.createElement('tr');
       tr.appendChild(serverCell(server));
       tr.appendChild(statusCell(server));
+      tr.appendChild(pingCell(server));
       tr.appendChild(cpuCell(server));
       tr.appendChild(cell(num(server.load, 2), 'mono'));
       tr.appendChild(memoryCell(server));
@@ -225,8 +248,12 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     if (data.polling) {
       status.textContent = 'Polling servers\u2026';
       status.className = 'polling';
+    } else if (data.pinging) {
+      status.textContent = 'Pinging servers\u2026';
+      status.className = 'polling';
     } else {
-      status.textContent = 'Poll every ' + data.intervalSec + ' s \u00B7 updated ' +
+      status.textContent = 'SSH every ' + data.sshIntervalSec + ' s \u00B7 ping every ' +
+                           data.pingIntervalSec + ' s \u00B7 updated ' +
                            new Date().toLocaleTimeString();
       status.className = 'muted';
     }
