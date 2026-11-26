@@ -117,6 +117,9 @@ class TftDashboard {
   };
 
   void drawSplash(const String& wifiSsid);
+  // Snapshots of the servers that should appear on the panel. Paused servers
+  // are skipped, so they never take a card, a page slot or a selection stop.
+  std::vector<MonitorService::Snapshot> visibleSnapshots() const;
   void renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots, size_t pages);
   void ensureChrome();
   void updateHeader();
@@ -168,6 +171,7 @@ class TftDashboard {
   TextField emptyUrl_;
   bool chromeDrawn_ = false;
   bool emptyDrawn_ = false;
+  bool emptyAllPaused_ = false;
   uint32_t lastPageMs_ = 0;
 
   DetailCache detail_;

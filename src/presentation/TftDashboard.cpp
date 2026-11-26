@@ -1,5 +1,6 @@
 #include "presentation/TftDashboard.h"
 
+#include <algorithm>
 #include <cmath>
 
 #if VPSPANEL_HAS_DISPLAY
@@ -338,7 +339,7 @@ void TftDashboard::update() {
     // point redrawing the detail screen on every update() call.
     if (detail_.frameDrawn && (now - lastRenderMs_) < kDetailRefreshMs) return;
 
-    const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+    const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
     const MonitorService::Snapshot* detail = nullptr;
     for (const auto& snapshot : snapshots) {
       if (snapshot.server.id == detailId_) {
@@ -369,7 +370,7 @@ void TftDashboard::update() {
   if (hasRendered_ && !newCycle && !forced && (now - lastRenderMs_) < kRefreshMs) return;
   lastCycleSeenMs_ = cycle;
 
-  const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+  const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
   size_t pages = snapshots.empty()
                      ? 1
                      : (snapshots.size() + kServersPerPage - 1) / kServersPerPage;
@@ -430,6 +431,16 @@ void TftDashboard::drawSplash(const String& wifiSsid) {
 
   tft_.setTextColor(kAccent, kBg);
   tft_.drawString("press A to setup WiFi", kScreenW / 2, kScreenH - 18, 1);
+}
+
+std::vector<MonitorService::Snapshot> TftDashboard::visibleSnapshots() const {
+  std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+  snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(),
+                                 [](const MonitorService::Snapshot& snapshot) {
+                                   return !snapshot.server.enabled;
+                                 }),
+                  snapshots.end());
+  return snapshots;
 }
 
 void TftDashboard::renderDashboard(const std::vector<MonitorService::Snapshot>& snapshots,
@@ -650,19 +661,27 @@ void TftDashboard::drawEmptyCard() {
   const int height =
       kCardH * static_cast<int>(kServersPerPage) + kCardGap * (static_cast<int>(kServersPerPage) - 1);
 
-  if (!emptyDrawn_) {
+  // When every configured server is paused there is nothing to show, but the
+  // panel must not claim that no servers exist.
+  const bool allPaused = !registry_.servers().empty();
+
+  if (!emptyDrawn_ || emptyAllPaused_ != allPaused) {
     tft_.fillRoundRect(x, y, kCardW, height, 8, kPanel);
     tft_.drawRoundRect(x, y, kCardW, height, 8, kLine);
 
     tft_.setTextDatum(TL_DATUM);
     tft_.setTextColor(kText, kPanel);
-    tft_.drawString("No servers configured", x + 14, y + 14, 2);
+    tft_.drawString(allPaused ? "No active servers" : "No servers configured", x + 14,
+                    y + 14, 2);
 
     tft_.setTextColor(kMuted, kPanel);
-    tft_.drawString("Add a host in the web interface:", x + 14, y + 44, 1);
+    tft_.drawString(allPaused ? "All servers are paused in the web UI:"
+                              : "Add a host in the web interface:",
+                    x + 14, y + 44, 1);
 
     emptyUrl_.valid = false;
     emptyDrawn_ = true;
+    emptyAllPaused_ = allPaused;
   }
 
   const String ip = WiFi.localIP().toString();
@@ -772,7 +791,7 @@ void TftDashboard::handleButtons(uint32_t now) {
   if (pressed & ButtonInput::kButtonB) moveSelection(1, now);
 
   if (selecting_ && (pressed & ButtonInput::kButtonC)) {
-    const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+    const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
     if (selectedIndex_ < snapshots.size()) {
       openDetail(snapshots[selectedIndex_].server.id);
     }
@@ -801,7 +820,7 @@ void TftDashboard::closeSetup(uint32_t now, bool ok) {
 }
 
 void TftDashboard::enterSelection(uint32_t now) {
-  const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+  const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
   if (snapshots.empty()) return;
 
   selecting_ = true;
@@ -816,7 +835,7 @@ void TftDashboard::enterSelection(uint32_t now) {
 }
 
 void TftDashboard::moveSelection(int delta, uint32_t now) {
-  const std::vector<MonitorService::Snapshot> snapshots = monitor_.snapshots();
+  const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
 
   if (snapshots.empty()) {
     exitSelection(now);

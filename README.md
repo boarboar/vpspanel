@@ -24,6 +24,10 @@ independent schedule.
 - Wi-Fi credentials default to `src/config/wifi_credentials.h` (which is
   **git-ignored**) and can be entered on the TFT setup screen, where they are
   saved to NVS.
+- Wi-Fi reconnection is automatic: if the station cannot join the network or the
+  link drops, the firmware retries every 60 s in the background, logging each
+  attempt to the serial console, and restores mDNS and the web listener once an
+  IP address is available again.
 - Serial console keeps printing poll results, so headless use still works.
 - Optional **TJCTM24024-SPI (ILI9341) TFT dashboard**: four server cards per
   page, automatic paging, Wi-Fi/IP status and poll age. The display can be
@@ -88,9 +92,11 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 
 - Header: title plus the device IP (or `WiFi offline`).
 - Four server cards per page: name with `host:port` in brackets, ping state and
-  RTT (`OK 12ms` / `DOWN`), state chip (`OK` / `ERROR` / `WAIT` / `PAUSED`), and
+  RTT (`OK 12ms` / `DOWN`), state chip (`OK` / `ERROR` / `WAIT`), and
   three usage gauges for CPU, memory and disk. Each gauge fills red for the used
   part and green for the free part, with the percentage written on it in white.
+  Paused servers are omitted from the panel (they stay visible in the web UI),
+  so they never take a card, a page slot or a selection stop.
 - Footer: both poll intervals (`ssh 60s / ping 15s`), `polling...`/`pinging...`
   or the age of the last SSH cycle, and `page x/y`.
 - With more than four servers the view rotates to the next page every 7 s;

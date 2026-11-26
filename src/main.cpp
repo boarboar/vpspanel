@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
+#include "esp_bt.h"
 
 #if __has_include("config/wifi_credentials.h")
 #include "config/wifi_credentials.h"
@@ -36,7 +37,9 @@ constexpr UBaseType_t kPollTaskPriority = 1;
 constexpr uint32_t kPingTaskStack = 8 * 1024;
 constexpr UBaseType_t kPingTaskPriority = 1;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
-constexpr uint32_t kWifiRetryIntervalMs = 15000;
+// How often the background reconnection logic retries after a failed
+// association or after the link goes down.
+constexpr uint32_t kWifiRetryIntervalMs = 60000;
 
 // Composition root: concrete implementations are chosen here and wired into
 // the domain services.
@@ -59,11 +62,26 @@ String wifiPassword = WIFI_PASSWORD;
 TaskHandle_t pollTaskHandle = nullptr;
 TaskHandle_t pingTaskHandle = nullptr;
 uint32_t lastWifiAttemptMs = 0;
+uint32_t wifiRetryCount = 0;
 bool wifiWasConnected = false;
 bool mdnsStarted = false;
 bool webDashboardStarted = false;
 bool webServerRestartPending = false;
 bool networkSuspended = false;
+
+const char* wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:      return "idle";
+    case WL_NO_SSID_AVAIL:    return "no SSID available";
+    case WL_SCAN_COMPLETED:   return "scan completed";
+    case WL_CONNECTED:        return "connected";
+    case WL_CONNECT_FAILED:   return "connect failed";
+    case WL_CONNECTION_LOST:  return "connection lost";
+    case WL_DISCONNECTED:     return "disconnected";
+    case WL_STOPPED:          return "stopped";
+    default:                  return "unknown";
+  }
+}
 
 void startMdns() {
   if (mdnsStarted) return;
@@ -74,11 +92,21 @@ void startMdns() {
   consoleView.printMdns(mdnsStarted);
 }
 
+// Starts a fresh association attempt.
 void beginWifiStation() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(WIFI_HOSTNAME);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   lastWifiAttemptMs = millis();
+}
+
+// Periodic retry. Aborts a half-finished attempt first: the Wi-Fi driver
+// ignores esp_wifi_connect() while it still believes a connection attempt is
+// running, which would silently drop the retry.
+void retryWifiStation() {
+  WiFi.disconnect(false, false);  // abort a pending attempt, keep radio/config
+  beginWifiStation();
 }
 
 // The Wi-Fi setup screen needs the radio quiet: both the boot-time association
@@ -101,6 +129,7 @@ void suspendNetworkForSetup() {
   WiFi.disconnect(true);  // also powers the radio down
   WiFi.mode(WIFI_OFF);
   wifiWasConnected = false;
+  wifiRetryCount = 0;
 }
 
 void resumeNetworkAfterSetup() {
@@ -135,12 +164,9 @@ void maintainSetupNetwork() {
 }
 
 void connectWifiDuringBoot() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(WIFI_HOSTNAME);
-
   consoleView.printWifiConnecting(wifiSsid.c_str());
   statusLed.setWifiConnecting(true);
-  WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
+  beginWifiStation();
 
   const uint32_t started = millis();
   uint32_t lastDotMs = started;
@@ -181,14 +207,16 @@ void maintainWifi() {
   if (connected) {
     if (!wifiWasConnected) {
       if (webServerRestartPending) {
-        // The listening socket was closed when the setup screen suspended the
-        // network; reopen it now that an IP address is available again.
+        // The listening socket was closed when the link went down (or when the
+        // setup screen suspended the network); reopen it now that an IP
+        // address is available again.
         webDashboard.resume();
         webServerRestartPending = false;
       }
       consoleView.printWifiConnected(WiFi.localIP().toString());
       startMdns();
       wifiWasConnected = true;
+      wifiRetryCount = 0;
       monitor.requestPoll();
       monitor.requestPing();
     }
@@ -198,12 +226,28 @@ void maintainWifi() {
   if (wifiWasConnected) {
     consoleView.printWifiLost();
     wifiWasConnected = false;
+    // Give the core's own reconnect a full interval from the moment the link
+    // was lost before forcing a fresh association.
+    lastWifiAttemptMs = millis();
+
+    // Sockets and mDNS do not survive the link going down: close the listening
+    // socket now and recreate it (and mDNS) once an IP address is back.
+    if (webDashboardStarted) {
+      webDashboard.suspend();
+      webServerRestartPending = true;
+    }
+    if (mdnsStarted) {
+      MDNS.end();
+      mdnsStarted = false;
+    }
   }
 
   if ((millis() - lastWifiAttemptMs) >= kWifiRetryIntervalMs) {
-    lastWifiAttemptMs = millis();
-    WiFi.disconnect();
-    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
+    ++wifiRetryCount;
+    Serial.printf("Wi-Fi: reconnect attempt %u (status: %s)\n",
+                  static_cast<unsigned>(wifiRetryCount),
+                  wifiStatusName(WiFi.status()));
+    retryWifiStation();
   }
 }
 
@@ -261,6 +305,7 @@ void displayTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(300);
+  esp_bt_controller_disable();
 
   consoleView.printBanner();
 
