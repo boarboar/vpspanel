@@ -380,13 +380,13 @@ void TftDashboard::update() {
   } else if (selecting_) {
     // The selection may point past the end after a server was removed. The
     // selected card also decides which page is visible while selecting, so
-    // A/B can move across page boundaries.
+    // the move buttons can move across page boundaries.
     if (selectedIndex_ >= snapshots.size()) selectedIndex_ = snapshots.size() - 1;
     page_ = selectedIndex_ / kServersPerPage;
   }
 
   // Automatic paging is suspended while a card is selected; the user drives
-  // the page with A/B instead.
+  // the page with the move buttons instead.
   if (!selecting_ && pages > 1 && hasRendered_ && (now - lastPageMs_) >= kPageMs) {
     page_ = (page_ + 1) % pages;
     lastPageMs_ = now;
@@ -735,7 +735,7 @@ void TftDashboard::drawRightField(TextField& field, const String& value, int rig
 }
 
 String TftDashboard::footerText() const {
-  if (selecting_) return "A/B: card | C: details";
+  if (selecting_) return "A/C: card | B: details";
 
   const AppSettings settings = registry_.settings();
   String text = "ssh " + String(settings.sshIntervalSec) + "s / ping " +
@@ -772,14 +772,15 @@ void TftDashboard::handleButtons(uint32_t now) {
   }
 
   if (view_ == View::Detail) {
-    // C returns to the dashboard, keeping the card selected so the user can
-    // continue browsing from where they were.
+    // The details button returns to the dashboard, keeping the card selected
+    // so the user can continue browsing from where they were.
     if (pressed & ButtonInput::kButtonC) closeDetail(now);
     return;
   }
 
   if (!selecting_) {
-    // A short C press enters Selection mode; A/B do nothing on the dashboard.
+    // A short details-button press enters Selection mode; the move buttons do
+    // nothing on the dashboard.
     if (pressed & ButtonInput::kButtonC) enterSelection(now);
     return;
   }
@@ -911,7 +912,7 @@ void TftDashboard::drawDetailFrame() {
 
   tft_.setTextDatum(TR_DATUM);
   tft_.setTextColor(kMuted, kBg);
-  tft_.drawString("C: back", kScreenW - 8, 8, 1);
+  tft_.drawString("B: back", kScreenW - 8, 8, 1);
 
   tft_.setTextDatum(TL_DATUM);
   tft_.drawFastHLine(10, kDetailIdentityDividerY, kScreenW - 20, kLine);

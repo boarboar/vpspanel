@@ -24,8 +24,9 @@
 // is never cleared and repainted as a whole, which is what caused the visible
 // flicker when the screen was refreshed every couple of seconds.
 //
-// Three buttons drive the screen: C enters Selection mode, A/B move the
-// highlighted card, C opens its details and C returns to the dashboard.
+// Three buttons drive the screen. The physical B and C roles are swapped
+// (VPSPANEL_SWAP_B_C): the B button enters Selection mode, A and C move the
+// highlighted card, and B opens the details and returns to the dashboard.
 // Selection mode is left automatically after 30 s without a button press.
 // On the boot splash, A opens the Wi-Fi setup dialog instead.
 class TftDashboard {

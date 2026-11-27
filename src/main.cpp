@@ -288,13 +288,14 @@ void pingTask(void*) {
 // associates; this task only replaces it with the dashboard.
 //
 // update() throttles its own redraws internally (1 s for the dashboard), so
-// the loop only needs to be fast enough to notice a new poll cycle and a
-// button press promptly.
+// the loop only needs to be fast enough to notice a new poll cycle promptly.
+// Buttons are sampled by their own task, so a slow SPI transfer cannot make
+// this loop miss a tap.
 void displayTask(void*) {
   for (;;) {
     tftDashboard.update();
-    // 10 ms keeps even very short button taps from falling between two polls;
-    // the renderer itself still throttles SPI traffic to once per second.
+    // 10 ms keeps the UI responsive; the renderer itself throttles SPI traffic
+    // to once per second.
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }

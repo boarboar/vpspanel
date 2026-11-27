@@ -112,18 +112,24 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 ### Buttons
 
 Three momentary buttons connect between the GPIO and GND (the internal
-pull-ups are enabled):
+pull-ups are enabled). GPIO 2 is a strapping pin with a weak internal pull-up;
+if the GPIO 2 button lead is long, add an external 10k pull-up to 3V3.
 
 | Button | ESP32-C3 | Function                                                     |
 | ------ | -------- | ------------------------------------------------------------ |
 | A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card; setup screen: previous key |
-| B      | GPIO 1   | Selection mode: next card; setup screen: next key             |
-| C      | GPIO 2   | Enter Selection mode / open details / back / press setup key |
+| B      | GPIO 1   | Enter Selection mode / open details / back / press setup key |
+| C      | GPIO 2   | Selection mode: next card; setup screen: next key             |
 | common | GND      |                                                              |
 
+The B and C roles are swapped (`VPSPANEL_SWAP_B_C` in
+`src/config/input_config.h`): the reliable GPIO 1 button performs the C actions,
+while the unreliable GPIO 2 button only moves the selection. Set the macro to
+`0` to restore the original mapping.
+
 The boot splash shows `press A to setup WiFi`. Pressing **A** there opens the
-Wi-Fi setup screen. **A/B** move the highlight across the virtual keyboard and
-**C** presses the highlighted key. The keyboard has lowercase, uppercase and
+Wi-Fi setup screen. **A/C** move the highlight across the virtual keyboard and
+**B** presses the highlighted key. The keyboard has lowercase, uppercase and
 symbol pages (the `abc` action cycles them) and these action keys:
 
 | Key   | Action                                                        |
@@ -154,11 +160,11 @@ available) and polling resumes on the next cycle.
 
 Behaviour:
 
-- A short press of **C** on the dashboard enters Selection mode. The selected
+- A short press of **B** on the dashboard enters Selection mode. The selected
   card gets a highlighted border and automatic paging stops.
-- In Selection mode **A** and **B** move the selection to the previous/next
+- In Selection mode **A** and **C** move the selection to the previous/next
   card. Selection wraps around and follows across page boundaries.
-- **C** opens the detail screen of the selected card. **C** there returns to
+- **B** opens the detail screen of the selected card. **B** there returns to
   the dashboard with the card still selected.
 - 30 seconds without a button press leaves Selection mode and resumes automatic
   paging. The timeout is `VPSPANEL_SELECTION_TIMEOUT_MS` in
@@ -203,7 +209,8 @@ flags in `platformio.ini`; change both to match your board. Avoid GPIO 2, 8 and 
     and `VPSPANEL_TFT_BL` / `VPSPANEL_TFT_BACKLIGHT_ON`.
 - `src/config/input_config.h` — button pins (`VPSPANEL_BUTTON_A_PIN`,
   `VPSPANEL_BUTTON_B_PIN`, `VPSPANEL_BUTTON_C_PIN`,
-  `VPSPANEL_BUTTON_ACTIVE_LOW`) and the Selection-mode timeout.
+  `VPSPANEL_BUTTON_ACTIVE_LOW`), the B/C role swap (`VPSPANEL_SWAP_B_C`) and
+  the Selection-mode timeout.
 - `platformio.ini` — the matching `-DTFT_*` / `-DUSER_SETUP_LOADED` build flags
   that configure the **TFT_eSPI library
   itself** (driver, 240x320 size, pins, 40 MHz SPI, fonts 1/2/4).
@@ -231,8 +238,9 @@ source. If colours are inverted (light background instead of dark), add
 `-DTFT_INVERSION_ON=1` to `build_flags` in `platformio.ini`.
 
 The panel is drawn from its own 10 KB FreeRTOS task, so a slow SPI refresh never
-blocks HTTP responses or the SSH poller. That task also polls and debounces the
-three buttons.
+blocks HTTP responses or the SSH poller. A separate tiny task samples the three
+buttons every 2 ms and requires a level to stay stable for 20 ms, so neither a
+long redraw nor contact bounce can swallow or duplicate a tap.
 
 ## Built-in status LED
 
@@ -319,9 +327,11 @@ different presentation (MQTT, display, etc.) only needs to observe
   `pingDue()` says so. It never waits for SSH, so reachability and RTT keep
   updating while an SSH poll is blocked on a slow host.
 - **Display task** — 10 KB stack (only when `VPSPANEL_HAS_DISPLAY = 1`). It
-  redraws the TFT at its own pace, polls the A/B/C buttons and never touches the
-  network. The panel is initialised from `setup()` before Wi-Fi, then handed
-  over to this task.
+  redraws the TFT at its own pace and never touches the network. The panel is
+  initialised from `setup()` before Wi-Fi, then handed over to this task.
+- **Button task** — 2 KB stack, samples the A/B/C pins every 2 ms and debounces
+  them independently of the display, so a tap is not lost while the panel is
+  being redrawn.
 - **Status LED** — no task of its own: non-blocking `StatusLed::update()` calls
   from the loop task and the boot-time Wi-Fi connect loop drive the blink.
 - Shared state (`ServerRegistry`, latest metrics) is protected by FreeRTOS
@@ -390,8 +400,8 @@ Free heap: 245000 bytes
 - The remote command is a single line in
   `src/infra/SshMetricsProvider.cpp`; extend the parser in
   `src/domain/MetricsParser.cpp` if you add metrics.
-- Display refresh (1 s), paging interval (7 s), button polling (10 ms), button
-  press lockout (30 ms) and servers per page are constants in
+- Display refresh (1 s), paging interval (7 s), button sampling (2 ms), button
+  debounce (20 ms) and servers per page are constants in
   `src/presentation/TftDashboard.cpp` / `src/infra/ButtonInput.h`; the
   Selection-mode timeout is in `src/config/input_config.h`, and the setup
   keyboard layout/pages are in `src/presentation/WifiSetupDialog.cpp`. The

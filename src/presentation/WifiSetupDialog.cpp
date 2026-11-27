@@ -337,7 +337,7 @@ void WifiSetupDialog::drawHeader() {
     tft_.drawString(notice_, kScreenW - 8, 9, 1);
   } else {
     tft_.setTextColor(kMuted, kBg);
-    tft_.drawString("A/B: move  C: press", kScreenW - 8, 9, 1);
+    tft_.drawString("A/C: move  B: press", kScreenW - 8, 9, 1);
   }
 }
 
