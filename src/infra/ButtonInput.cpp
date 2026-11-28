@@ -91,6 +91,7 @@ uint8_t ButtonInput::roleFor(uint8_t index) {
 void ButtonInput::sample() {
   const uint32_t now = millis();
   uint8_t pressed = 0;
+  uint8_t stableRoles = 0;
 
   for (uint8_t i = 0; i < kButtonCount; ++i) {
     const int pin = pinFor(i);
@@ -114,6 +115,22 @@ void ButtonInput::sample() {
         pressed |= roleFor(i);
       }
     }
+
+    if (state.stable) stableRoles |= roleFor(i);
+  }
+
+  // The physical A and B buttons held together are a single chord event, not
+  // two normal presses. The roles they map to depend on the B/C swap, so derive
+  // the mask from the physical pin order instead of assuming logical A+B.
+  const uint8_t chordRoles = roleFor(0) | roleFor(1);
+  if ((stableRoles & chordRoles) == chordRoles) {
+    if (!chordActive_) {
+      chordActive_ = true;
+      pressed |= kChordAB;
+    }
+    pressed &= ~chordRoles;
+  } else {
+    chordActive_ = false;
   }
 
   if (pressed != 0) {

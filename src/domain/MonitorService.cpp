@@ -92,6 +92,17 @@ void MonitorService::pollAll() {
 
     {
       Guard guard(mutex_);
+      const auto previous = metrics_.find(server.id);
+      if (metrics.ok) {
+        metrics.consecutiveFailures = 0;
+        metrics.everSucceeded = true;
+      } else {
+        metrics.everSucceeded =
+            previous != metrics_.end() && previous->second.everSucceeded;
+        const uint8_t failures =
+            previous == metrics_.end() ? 0 : previous->second.consecutiveFailures;
+        metrics.consecutiveFailures = failures < 255 ? failures + 1 : 255;
+      }
       metrics_[server.id] = metrics;
     }
 
@@ -136,10 +147,22 @@ void MonitorService::pingAll() {
     if (!server.enabled) continue;
 
     PingResult ping = pingProvider_.ping(server);
+    ping.valid = true;  // an attempt was made, even if the lookup itself failed
     ping.polledAtMs = markMillis();
 
     {
       Guard guard(mutex_);
+      const auto previous = pings_.find(server.id);
+      if (ping.reachable) {
+        ping.consecutiveFailures = 0;
+        ping.everReachable = true;
+      } else {
+        ping.everReachable =
+            previous != pings_.end() && previous->second.everReachable;
+        const uint8_t failures =
+            previous == pings_.end() ? 0 : previous->second.consecutiveFailures;
+        ping.consecutiveFailures = failures < 255 ? failures + 1 : 255;
+      }
       pings_[server.id] = ping;
     }
 

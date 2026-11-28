@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 
+#include "domain/HealthStatus.h"
 #include "presentation/WebAssets.h"
 
 namespace {
@@ -343,6 +344,7 @@ void WebDashboard::handleApiMetrics() {
   doc["lastCycleAgeMs"] = lastCycleAt == 0 ? -1 : static_cast<int32_t>(now - lastCycleAt);
   const uint32_t lastPingAt = monitor_.lastPingCycleAtMs();
   doc["lastPingAgeMs"] = lastPingAt == 0 ? -1 : static_cast<int32_t>(now - lastPingAt);
+  doc["failureThreshold"] = kErrorAfterFailedAttempts;
 
   JsonArray array = doc["servers"].to<JsonArray>();
   for (const auto& snapshot : monitor_.snapshots()) {
@@ -354,8 +356,11 @@ void WebDashboard::handleApiMetrics() {
     obj["host"] = snapshot.server.host;
     obj["port"] = snapshot.server.port;
     obj["enabled"] = snapshot.server.enabled;
+    obj["valid"] = metrics.valid;
     obj["ok"] = metrics.ok;
+    obj["everSucceeded"] = metrics.everSucceeded;
     obj["error"] = metrics.error;
+    obj["failures"] = metrics.consecutiveFailures;
     obj["load"] = metrics.load1;
     obj["cpu"] = metrics.cpuPercent;
     obj["memUsed"] = metrics.memUsedMb;
@@ -364,14 +369,17 @@ void WebDashboard::handleApiMetrics() {
     obj["diskTotal"] = metrics.diskTotalMb;
     obj["ageMs"] = metrics.valid ? static_cast<int32_t>(now - metrics.polledAtMs) : -1;
     obj["durationMs"] = metrics.durationMs;
+    obj["pingValid"] = ping.valid;
     obj["pingOk"] = ping.valid && ping.reachable;
+    obj["pingEverReachable"] = ping.everReachable;
     obj["pingMs"] = ping.rttMs;
     obj["pingError"] = ping.error;
+    obj["pingFailures"] = ping.consecutiveFailures;
     obj["pingAgeMs"] = ping.valid ? static_cast<int32_t>(now - ping.polledAtMs) : -1;
   }
 
   String payload;
-  payload.reserve(256 + doc["servers"].size() * 260);
+  payload.reserve(256 + doc["servers"].size() * 320);
   serializeJson(doc, payload);
 
   server_.sendHeader("Cache-Control", "no-store");

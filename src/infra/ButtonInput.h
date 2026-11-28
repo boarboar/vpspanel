@@ -23,6 +23,9 @@ class ButtonInput {
     kButtonA = 1 << 0,
     kButtonB = 1 << 1,
     kButtonC = 1 << 2,
+    // The physical A and B buttons are held at the same time. Reported once per
+    // chord; the individual presses are suppressed while the chord is active.
+    kChordAB = 1 << 3,
   };
 
   // Configures the pins and starts the sampling task. A button that is already
@@ -55,4 +58,5 @@ class ButtonInput {
   std::atomic<uint8_t> latched_{0};
   bool initialized_ = false;
   bool taskStarted_ = false;
+  bool chordActive_ = false;
 };

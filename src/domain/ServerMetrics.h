@@ -9,6 +9,14 @@ struct ServerMetrics {
   bool ok = false;       // the last poll succeeded
   String error;          // human readable reason when ok == false
 
+  // Consecutive failed SSH polls, reset to 0 by a successful poll. The host is
+  // only reported as ERROR once this reaches kErrorAfterFailedAttempts.
+  uint8_t consecutiveFailures = 0;
+
+  // True once at least one SSH poll has succeeded. Until then a failed poll is
+  // reported as "n/a" instead of a degraded "OK".
+  bool everSucceeded = false;
+
   float cpuPercent = NAN;  // overall CPU usage
   float load1 = NAN;       // 1 minute load average
   float cpuCores = NAN;    // number of logical CPUs

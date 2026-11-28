@@ -8,6 +8,7 @@
 #include <WiFi.h>
 
 #include "config/input_config.h"
+#include "domain/HealthStatus.h"
 #include "presentation/TftTheme.h"
 
 // TFT_eSPI gets its pins from platformio.ini build_flags. These asserts fail
@@ -46,10 +47,11 @@ constexpr int kGaugeCount = 3;
 
 // First row of a card: title on the left, then the ping state and the SSH
 // state. Ping and chip use font 1, which keeps nearly the full card width for
-// the title while still fitting at the right edge.
-constexpr int kCardPingRight = kCardW - 62;
-constexpr int kCardPingClearX = kCardW - 118;
-constexpr int kCardPingClearW = 56;
+// the title while still fitting at the right edge. The ping state is left
+// aligned at a fixed x so every value ("OK 12ms", "OK", "DOWN", ...) lines up
+// horizontally across cards.
+constexpr int kCardPingX = kCardW - 118;
+constexpr int kCardPingW = 56;
 constexpr int kCardChipClearX = kCardW - 54;
 constexpr int kCardChipClearW = 44;
 constexpr int kCardTitleMaxWidth = kCardW - 136;
@@ -86,8 +88,8 @@ constexpr int kDetailBarX = 10;
 constexpr int kDetailBarW = 300;
 constexpr int kDetailBarH = 6;
 constexpr int kDetailGaugeDY = 31;
-constexpr int kDetailInfoClearY = 204;
-constexpr int kDetailInfoClearH = 26;
+constexpr int kDetailInfoLine1Y = 204;
+constexpr int kDetailInfoLine2Y = 216;
 
 // Ping state shares the endpoint row of the identity section.
 constexpr int kDetailPingClearX = kScreenW - 114;
@@ -96,6 +98,41 @@ constexpr int kDetailEndpointMaxWidth = 190;
 
 static_assert(kDetailInfoY + kDetailSectionH <= kScreenH, "detail sections must fit");
 static_assert(kDetailGaugeDY + kDetailBarH < kDetailSectionH, "detail bars must fit");
+
+// System menu layout: one full-width row per item, with the instructions in
+// the footer.
+constexpr int kMenuHeaderH = 28;
+constexpr int kMenuX = 10;
+constexpr int kMenuW = kScreenW - 20;
+constexpr int kMenuFirstY = 38;
+constexpr int kMenuRowH = 28;
+constexpr int kMenuGap = 6;
+constexpr int kMenuFooterY = 218;
+
+constexpr uint8_t kMenuClose = 0;
+constexpr uint8_t kMenuInfo = 1;
+constexpr uint8_t kMenuSettings = 2;
+constexpr uint8_t kMenuReboot = 3;
+constexpr uint8_t kMenuFactoryReset = 4;
+constexpr uint8_t kMenuItemCount = 5;
+
+static_assert(kMenuFirstY + (kMenuItemCount - 1) * (kMenuRowH + kMenuGap) + kMenuRowH <=
+                  kScreenH,
+              "system menu items must fit on screen");
+
+// System info screen: a label/value row per metric, with the back hint in the
+// footer. Seven rows fit between the header and the footer.
+constexpr int kInfoHeaderH = 28;
+constexpr int kInfoRowX = 10;
+constexpr int kInfoRowW = kScreenW - 20;
+constexpr int kInfoFirstY = 32;
+constexpr int kInfoRowH = 24;
+constexpr int kInfoRowStep = 27;
+constexpr int kInfoLabelW = 120;
+constexpr int kInfoFooterY = 220;
+
+static_assert(kInfoFirstY + (7 - 1) * kInfoRowStep + kInfoRowH <= kInfoFooterY,
+              "system info rows must fit above the footer");
 
 int cardY(size_t slot) {
   return kCardY0 + static_cast<int>(slot) * (kCardH + kCardGap);
@@ -207,39 +244,76 @@ String formatRtt(float rttMs) {
   return String(static_cast<int>(lroundf(rttMs)));
 }
 
-// Compact first-row form: "OK 12ms", "DOWN", "..." while waiting, "n/a" when
-// the server is paused.
-void formatPingShort(const PingResult& ping, bool enabled, String& text, uint16_t& color) {
-  if (!enabled) {
-    text = "n/a";
-    color = kMuted;
-  } else if (!ping.valid) {
-    text = "...";
-    color = kMuted;
-  } else if (ping.reachable) {
-    text = "OK " + formatRtt(ping.rttMs) + "ms";
-    color = kOk;
-  } else {
-    text = "DOWN";
-    color = kErr;
+// Human-readable byte count for the system info screen.
+String formatBytes(uint32_t bytes) {
+  if (bytes >= 1024UL * 1024UL) {
+    return String(bytes / (1024.0f * 1024.0f), 1) + " MB";
   }
+  if (bytes >= 1024UL) return String(bytes / 1024.0f, 1) + " KB";
+  return String(bytes) + " B";
+}
+
+// Colour of a health level. The first two failed attempts keep the OK label
+// but turn yellow and then orange; only the third one becomes red.
+uint16_t healthColor(HealthLevel level) {
+  switch (level) {
+    case HealthLevel::Ok: return kOk;
+    case HealthLevel::Warn1: return kYellow;
+    case HealthLevel::Warn2: return kOrange;
+    case HealthLevel::Error: return kErr;
+    case HealthLevel::Paused:
+    case HealthLevel::Waiting:
+    case HealthLevel::Unavailable:
+    default: return kMuted;
+  }
+}
+
+// SSH state chip label: the first two failures still count as OK.
+const char* sshLabel(HealthLevel level) {
+  switch (level) {
+    case HealthLevel::Paused: return "PAUSED";
+    case HealthLevel::Error: return "ERROR";
+    case HealthLevel::Waiting: return "WAIT";
+    case HealthLevel::Unavailable: return "n/a";
+    case HealthLevel::Ok:
+    case HealthLevel::Warn1:
+    case HealthLevel::Warn2:
+    default: return "OK";
+  }
+}
+
+// Compact first-row form: "OK 12ms", "DOWN", "..." while waiting, "n/a" when
+// the server is paused. During the first two failures the last known state is
+// still "OK", only its colour changes.
+void formatPingShort(const PingResult& ping, bool enabled, String& text, uint16_t& color) {
+  const HealthLevel level = healthLevel(enabled, ping.valid, ping.reachable,
+                                        ping.everReachable, ping.consecutiveFailures);
+  switch (level) {
+    case HealthLevel::Paused: text = "n/a"; break;
+    case HealthLevel::Waiting: text = "..."; break;
+    case HealthLevel::Unavailable: text = "n/a"; break;
+    case HealthLevel::Ok: text = "OK " + formatRtt(ping.rttMs) + "ms"; break;
+    case HealthLevel::Warn1:
+    case HealthLevel::Warn2: text = "OK"; break;
+    case HealthLevel::Error: text = "DOWN"; break;
+  }
+  color = healthColor(level);
 }
 
 // Detail-section form: "PING 12 ms", "PING DOWN", ...
 void formatPingLong(const PingResult& ping, bool enabled, String& text, uint16_t& color) {
-  if (!enabled) {
-    text = "PING n/a";
-    color = kMuted;
-  } else if (!ping.valid) {
-    text = "PING ...";
-    color = kMuted;
-  } else if (ping.reachable) {
-    text = "PING " + formatRtt(ping.rttMs) + " ms";
-    color = kOk;
-  } else {
-    text = "PING DOWN";
-    color = kErr;
+  const HealthLevel level = healthLevel(enabled, ping.valid, ping.reachable,
+                                        ping.everReachable, ping.consecutiveFailures);
+  switch (level) {
+    case HealthLevel::Paused: text = "PING n/a"; break;
+    case HealthLevel::Waiting: text = "PING ..."; break;
+    case HealthLevel::Unavailable: text = "PING n/a"; break;
+    case HealthLevel::Ok: text = "PING " + formatRtt(ping.rttMs) + " ms"; break;
+    case HealthLevel::Warn1:
+    case HealthLevel::Warn2: text = "PING OK"; break;
+    case HealthLevel::Error: text = "PING DOWN"; break;
   }
+  color = healthColor(level);
 }
 
 // Gauge fills are a little deeper than kErr/kOk so the white percentage text
@@ -323,6 +397,30 @@ void TftDashboard::update() {
   // selection changes.
   if (view_ == View::Setup) {
     setupDialog_.update();
+    return;
+  }
+
+  // The system menu is static apart from its selection highlight.
+  if (view_ == View::SystemMenu) {
+    if (!menuDrawn_ || menuSelection_ != menuDrawnSelection_) {
+      drawSystemMenu();
+      menuDrawn_ = true;
+      menuDrawnSelection_ = menuSelection_;
+    }
+    return;
+  }
+
+  // The system info values only change slowly; refresh once per second.
+  if (view_ == View::SystemInfo) {
+    if (!infoFrameDrawn_) {
+      drawSystemInfoFrame();
+      infoFrameDrawn_ = true;
+      lastInfoRefreshMs_ = now;
+    } else if ((now - lastInfoRefreshMs_) < kRefreshMs) {
+      return;
+    }
+    renderSystemInfo();
+    lastInfoRefreshMs_ = now;
     return;
   }
 
@@ -573,22 +671,13 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
   String pingText;
   uint16_t pingColor = kMuted;
   formatPingShort(snapshot.ping, server.enabled, pingText, pingColor);
-  drawRightField(cache.ping, pingText, x + kCardPingRight, y + 8, x + kCardPingClearX,
-                 kCardPingClearW, 1, pingColor);
+  drawField(cache.ping, pingText, x + kCardPingX, y + 8, 1, pingColor,
+            x + kCardPingX + kCardPingW);
 
-  uint16_t chipColor = kMuted;
-  const char* chip = "WAIT";
-  if (!server.enabled) {
-    chip = "PAUSED";
-  } else if (metrics.ok) {
-    chipColor = kOk;
-    chip = "OK";
-  } else if (metrics.valid) {
-    chipColor = kErr;
-    chip = "ERROR";
-  }
-  drawRightField(cache.chip, chip, x + kCardW - 10, y + 8, x + kCardChipClearX,
-                 kCardChipClearW, 1, chipColor);
+  const HealthLevel sshLevel = healthLevel(server.enabled, metrics.valid, metrics.ok,
+                                           metrics.everSucceeded, metrics.consecutiveFailures);
+  drawRightField(cache.chip, sshLabel(sshLevel), x + kCardW - 10, y + 8, x + kCardChipClearX,
+                 kCardChipClearW, 1, healthColor(sshLevel));
 
   // ---- body: layout may change between waiting/error/metrics -------------
   CardLayout layout = CardLayout::Waiting;
@@ -612,12 +701,14 @@ void TftDashboard::renderCard(const MonitorService::Snapshot& snapshot, size_t s
   }
 
   if (layout == CardLayout::Error) {
-    if (!cache.error.valid || cache.error.text != metrics.error) {
+    const uint16_t errorColor = healthColor(sshLevel);
+    if (!cache.error.valid || cache.error.text != metrics.error ||
+        cache.error.color != errorColor) {
       // A longer previous message must not leave fragments behind.
       tft_.fillRect(x + 6, y + 20, kCardW - 12, kCardH - 24, kPanel);
-      drawWrapped(tft_, metrics.error, x + 10, y + 22, x + kCardW - 10, 2, kErr, kPanel);
+      drawWrapped(tft_, metrics.error, x + 10, y + 22, x + kCardW - 10, 2, errorColor, kPanel);
       cache.error.text = metrics.error;
-      cache.error.color = kErr;
+      cache.error.color = errorColor;
       cache.error.valid = true;
     }
     return;
@@ -757,6 +848,27 @@ void TftDashboard::handleButtons(uint32_t now) {
   const uint8_t pressed = buttons_.poll();
   if (pressed == 0) return;
 
+  // The A+B chord opens the system menu from the dashboard or a detail screen.
+  if (pressed & ButtonInput::kChordAB) {
+    if (view_ == View::Dashboard || view_ == View::Detail) openSystemMenu();
+    return;
+  }
+
+  if (view_ == View::SystemMenu) {
+    // Physical A/C move, physical B activates (the same role mapping as the
+    // dashboard and the Wi-Fi setup keyboard).
+    if (pressed & ButtonInput::kButtonA) moveSystemMenu(-1);
+    if (pressed & ButtonInput::kButtonB) moveSystemMenu(1);
+    if (pressed & ButtonInput::kButtonC) activateSystemMenu();
+    return;
+  }
+
+  if (view_ == View::SystemInfo) {
+    // B returns to the system menu.
+    if (pressed & ButtonInput::kButtonB) closeSystemInfo();
+    return;
+  }
+
   if (view_ == View::Splash) {
     // A is only special on the boot splash; on the dashboard it stays free.
     if (pressed & ButtonInput::kButtonA) openSetup();
@@ -820,10 +932,114 @@ void TftDashboard::closeSetup(uint32_t now, bool ok) {
   drawSplash(wifiSsid_);
 }
 
+void TftDashboard::openSystemMenu() {
+  selecting_ = false;
+  detailId_ = "";
+  resetDetail();
+  view_ = View::SystemMenu;
+  menuSelection_ = kMenuClose;
+  menuDrawn_ = false;
+  Serial.println(F("Menu: system menu opened"));
+}
+
+void TftDashboard::closeSystemMenu(uint32_t now) {
+  view_ = View::Dashboard;
+  menuDrawn_ = false;
+  invalidateDashboard();
+  lastPageMs_ = now;
+  Serial.println(F("Menu: closed"));
+}
+
+void TftDashboard::moveSystemMenu(int delta) {
+  int next = static_cast<int>(menuSelection_) + delta;
+  if (next < 0) next = kMenuItemCount - 1;
+  if (next >= kMenuItemCount) next = 0;
+  menuSelection_ = static_cast<uint8_t>(next);
+}
+
+void TftDashboard::activateSystemMenu() {
+  switch (menuSelection_) {
+    case kMenuClose:
+      closeSystemMenu(millis());
+      break;
+    case kMenuInfo:
+      openSystemInfo();
+      break;
+    case kMenuReboot:
+      Serial.println(F("Menu: rebooting"));
+      Serial.flush();
+      ESP.restart();
+      break;
+    default:
+      // Settings and Factory reset are placeholders for now.
+      break;
+  }
+}
+
+void TftDashboard::openSystemInfo() {
+  view_ = View::SystemInfo;
+  infoFrameDrawn_ = false;
+  lastInfoRefreshMs_ = 0;
+  for (auto& value : infoValues_) value.valid = false;
+  Serial.println(F("Menu: system info opened"));
+}
+
+void TftDashboard::closeSystemInfo() {
+  view_ = View::SystemMenu;
+  infoFrameDrawn_ = false;
+  // Force the menu to repaint, since the info screen overwrote it.
+  menuDrawn_ = false;
+  Serial.println(F("Menu: system info closed"));
+}
+
+void TftDashboard::drawSystemInfoFrame() {
+  static const char* const kLabels[kSystemInfoRows] = {
+      "Free RAM", "Free Flash", "Free PSRAM", "Chip temp", "SSID", "WiFi MAC", "IP address"};
+
+  tft_.fillScreen(kPanel);
+  tft_.fillRect(0, 0, kScreenW, kInfoHeaderH, kBg);
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.setTextColor(kAccent, kBg);
+  tft_.drawString("SYSTEM INFO", 8, 5, 2);
+
+  for (size_t i = 0; i < kSystemInfoRows; ++i) {
+    const int y = kInfoFirstY + static_cast<int>(i) * kInfoRowStep;
+
+    tft_.setTextDatum(TL_DATUM);
+    tft_.setTextColor(kMuted, kPanel);
+    tft_.drawString(kLabels[i], kInfoRowX, y + 8, 1);
+
+    tft_.drawFastHLine(kInfoRowX, y + kInfoRowH, kInfoRowW, kLine);
+  }
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.setTextColor(kMuted, kPanel);
+  tft_.drawString("B: back", kInfoRowX, kInfoFooterY, 1);
+}
+
+void TftDashboard::renderSystemInfo() {
+  const uint32_t psramSize = ESP.getPsramSize();
+
+  String values[kSystemInfoRows];
+  values[0] = formatBytes(ESP.getFreeHeap());
+  values[1] = formatBytes(ESP.getFreeSketchSpace());
+  values[2] = psramSize > 0 ? formatBytes(ESP.getFreePsram()) : "none";
+  values[3] = String(temperatureRead(), 1) + " C";
+  values[4] = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "not connected";
+  values[5] = WiFi.macAddress();
+  values[6] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "-";
+
+  for (size_t i = 0; i < kSystemInfoRows; ++i) {
+    const int y = kInfoFirstY + static_cast<int>(i) * kInfoRowStep;
+    drawField(infoValues_[i], ellipsize(tft_, values[i], 2, kScreenW - 20 - kInfoLabelW),
+              kInfoRowX + kInfoLabelW, y + 4, 2, kText, kScreenW - 10);
+  }
+}
+
 void TftDashboard::enterSelection(uint32_t now) {
   const std::vector<MonitorService::Snapshot> snapshots = visibleSnapshots();
   if (snapshots.empty()) return;
-
   selecting_ = true;
 
   // Start with the first card of the page that is currently visible.
@@ -930,6 +1146,7 @@ void TftDashboard::drawDetailFrame() {
 void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
   const ServerConfig& server = snapshot.server;
   const ServerMetrics& metrics = snapshot.metrics;
+  const PingResult& ping = snapshot.ping;
 
   tft_.startWrite();
 
@@ -937,18 +1154,10 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
   const String name = ellipsize(tft_, server.displayName(), 4, 185);
   drawField(detail_.name, name, 10, 30, 4, kText, 200);
 
-  uint16_t chipColor = kMuted;
-  const char* chip = "WAIT";
-  if (!server.enabled) {
-    chip = "PAUSED";
-  } else if (metrics.ok) {
-    chipColor = kOk;
-    chip = "OK";
-  } else if (metrics.valid) {
-    chipColor = kErr;
-    chip = "ERROR";
-  }
-  drawRightField(detail_.chip, chip, kScreenW - 10, 34, 205, 107, 2, chipColor);
+  const HealthLevel sshLevel = healthLevel(server.enabled, metrics.valid, metrics.ok,
+                                           metrics.everSucceeded, metrics.consecutiveFailures);
+  drawRightField(detail_.chip, sshLabel(sshLevel), kScreenW - 10, 34, 205, 107, 2,
+                 healthColor(sshLevel));
 
   String endpoint = server.user.length() > 0 ? server.user + "@" + server.endpoint()
                                              : server.endpoint();
@@ -1063,42 +1272,92 @@ void TftDashboard::renderDetail(const MonitorService::Snapshot& snapshot) {
     }
   }
 
-  // ---- info: uptime, or the reason data is unavailable -------------------
-  uint8_t infoKind = 0;
-  String infoText;
-  if (!server.enabled) {
-    infoKind = 1;
-    infoText = "polling is paused";
-  } else if (!metrics.valid) {
-    infoKind = 1;
-    infoText = "waiting for first poll...";
-  } else if (!metrics.ok) {
-    infoKind = 2;
-    infoText = metrics.error;
-  } else {
-    infoText = "Uptime: " + formatUptime(metrics.uptimeSec);
+  // ---- info: one line each for SSH and ping, including failure counts ----
+  const HealthLevel pingLevel = healthLevel(server.enabled, ping.valid, ping.reachable,
+                                            ping.everReachable, ping.consecutiveFailures);
+
+  String sshInfo;
+  uint16_t sshInfoColor = kMuted;
+  switch (sshLevel) {
+    case HealthLevel::Paused:
+      sshInfo = "SSH: paused";
+      break;
+    case HealthLevel::Waiting:
+      sshInfo = "SSH: waiting for first poll...";
+      break;
+    case HealthLevel::Ok:
+      sshInfo = "SSH: OK";
+      if (!isnan(metrics.uptimeSec)) {
+        sshInfo += " - uptime " + formatUptime(metrics.uptimeSec);
+      }
+      sshInfoColor = kText;
+      break;
+    default:
+      sshInfo = "SSH: " + String(metrics.consecutiveFailures) + " failed - " +
+                metrics.error;
+      sshInfoColor = healthColor(sshLevel);
+      break;
   }
 
-  if (infoKind != detail_.infoKind || detail_.info.text != infoText ||
-      !detail_.info.valid) {
-    tft_.fillRect(kDetailBarX, kDetailInfoClearY, kDetailBarW, kDetailInfoClearH, kPanel);
-    const int infoY = kDetailInfoY + kDetailValueDY;
-
-    if (infoKind == 2) {
-      drawWrapped(tft_, infoText, 10, infoY, kScreenW - 10, 2, kErr, kPanel);
-    } else {
-      const uint16_t color = infoKind == 1 ? kMuted : kText;
-      tft_.setTextDatum(TL_DATUM);
-      tft_.setTextColor(color, kPanel);
-      tft_.drawString(ellipsize(tft_, infoText, 2, kScreenW - 20), 10, infoY, 2);
-    }
-
-    detail_.infoKind = infoKind;
-    detail_.info.text = infoText;
-    detail_.info.valid = true;
+  String pingInfo;
+  uint16_t pingInfoColor = kMuted;
+  switch (pingLevel) {
+    case HealthLevel::Paused:
+      pingInfo = "PING: paused";
+      break;
+    case HealthLevel::Waiting:
+      pingInfo = "PING: waiting for first probe...";
+      break;
+    case HealthLevel::Ok:
+      pingInfo = "PING: OK " + formatRtt(ping.rttMs) + " ms";
+      pingInfoColor = kText;
+      break;
+    default:
+      pingInfo = "PING: " + String(ping.consecutiveFailures) + " failed - " + ping.error;
+      pingInfoColor = healthColor(pingLevel);
+      break;
   }
+
+  drawField(detail_.info, ellipsize(tft_, sshInfo, 1, kScreenW - 20), 10,
+            kDetailInfoLine1Y, 1, sshInfoColor, kScreenW - 10);
+  drawField(detail_.pingInfo, ellipsize(tft_, pingInfo, 1, kScreenW - 20), 10,
+            kDetailInfoLine2Y, 1, pingInfoColor, kScreenW - 10);
 
   tft_.endWrite();
+}
+
+void TftDashboard::drawSystemMenu() {
+  static const char* const kLabels[kMenuItemCount] = {
+      "Close", "Info", "Settings", "Reboot", "Factory reset"};
+
+  tft_.fillScreen(kPanel);
+  tft_.fillRect(0, 0, kScreenW, kMenuHeaderH, kBg);
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.setTextColor(kAccent, kBg);
+  tft_.drawString("SYSTEM MENU", 8, 5, 2);
+
+  for (uint8_t i = 0; i < kMenuItemCount; ++i) {
+    const int y = kMenuFirstY + static_cast<int>(i) * (kMenuRowH + kMenuGap);
+    const bool selected = i == menuSelection_;
+    const uint16_t background = selected ? kPanel2 : kPanel;
+
+    tft_.fillRoundRect(kMenuX, y, kMenuW, kMenuRowH, 6, background);
+    tft_.drawRoundRect(kMenuX, y, kMenuW, kMenuRowH, 6,
+                       selected ? kSelected : kLine);
+
+    if (selected) {
+      tft_.fillRect(kMenuX + 6, y + 8, 4, kMenuRowH - 16, kSelected);
+    }
+
+    tft_.setTextDatum(TL_DATUM);
+    tft_.setTextColor(selected ? kSelected : kText, background);
+    tft_.drawString(kLabels[i], kMenuX + 16, y + 6, 2);
+  }
+
+  tft_.setTextDatum(TL_DATUM);
+  tft_.setTextColor(kMuted, kPanel);
+  tft_.drawString("A/C: move   B: select", kMenuX, kMenuFooterY, 1);
 }
 
 #else  // !VPSPANEL_HAS_DISPLAY

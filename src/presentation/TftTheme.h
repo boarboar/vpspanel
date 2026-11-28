@@ -17,6 +17,8 @@ constexpr uint16_t kMuted = rgb565(147, 161, 189);
 constexpr uint16_t kAccent = rgb565(77, 163, 255);
 constexpr uint16_t kOk = rgb565(61, 220, 151);
 constexpr uint16_t kWarn = rgb565(255, 180, 84);
+constexpr uint16_t kYellow = rgb565(255, 214, 102);  // first failed attempt
+constexpr uint16_t kOrange = rgb565(255, 150, 60);   // second failed attempt
 constexpr uint16_t kErr = rgb565(255, 107, 107);
 constexpr uint16_t kSelected = rgb565(255, 214, 102);  // Selection-mode border
 

@@ -7,7 +7,7 @@ inline const char kCss[] PROGMEM = R"CSS(
 :root{
   --bg:#0f1420;--panel:#171e2e;--panel2:#1e2739;--line:#2a3550;
   --text:#e7ecf5;--muted:#93a1bd;--accent:#4da3ff;
-  --ok:#3ddc97;--warn:#ffb454;--err:#ff6b6b;
+  --ok:#3ddc97;--warn:#ffb454;--warn1:#ffd666;--warn2:#ff963c;--err:#ff6b6b;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
@@ -30,11 +30,15 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute
 tr:last-child td{border-bottom:none}
 .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
 .chip.ok{background:rgba(61,220,151,.14);color:var(--ok)}
+.chip.warn1{background:rgba(255,214,102,.14);color:var(--warn1)}
+.chip.warn2{background:rgba(255,150,60,.14);color:var(--warn2)}
 .chip.err{background:rgba(255,107,107,.14);color:var(--err)}
 .chip.idle{background:rgba(147,161,189,.14);color:var(--muted)}
 .muted{color:var(--muted)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
 .err-text{color:var(--err);font-size:12px;margin-top:3px;word-break:break-word;max-width:280px}
+.err-text.warn1{color:var(--warn1)}
+.err-text.warn2{color:var(--warn2)}
 .bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin-top:6px;min-width:90px}
 .bar>i{display:block;height:100%;background:var(--accent)}
 .bar.hot>i{background:var(--err)}
@@ -85,6 +89,7 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
   var empty = document.getElementById('empty');
   var status = document.getElementById('status');
   var pollBtn = document.getElementById('poll');
+  var failureThreshold = 3;
 
   function cell(text, className) {
     var td = document.createElement('td');
@@ -122,18 +127,30 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     return td;
   }
 
+  function failureClass(failures) {
+    return failures >= 2 ? 'warn2' : 'warn1';
+  }
+
   function statusCell(server) {
     var td = document.createElement('td');
     var cls = 'idle';
     var label = 'Pending';
+    var failures = isNumber(server.failures) ? server.failures : 0;
     if (!server.enabled) {
       label = 'Paused';
+    } else if (!server.valid) {
+      label = 'Pending';
     } else if (server.ok) {
       cls = 'ok';
       label = 'OK';
-    } else if (server.error) {
+    } else if (failures >= failureThreshold) {
       cls = 'err';
       label = 'Error';
+    } else if (!server.everSucceeded) {
+      label = 'n/a';
+    } else {
+      cls = failureClass(failures);
+      label = 'OK';
     }
     var chip = document.createElement('span');
     chip.className = 'chip ' + cls;
@@ -141,8 +158,10 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     td.appendChild(chip);
     if (server.error) {
       var err = document.createElement('div');
-      err.className = 'err-text';
-      err.textContent = server.error;
+      err.className = 'err-text' +
+                       (cls === 'warn1' || cls === 'warn2' ? ' ' + cls : '');
+      err.textContent = (!server.ok && failures > 0 ? failures + ' failed: ' : '') +
+                        server.error;
       td.appendChild(err);
     }
     return td;
@@ -153,20 +172,33 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
     var chip = document.createElement('span');
     var cls = 'idle';
     var label = 'Pending';
+    var failures = isNumber(server.pingFailures) ? server.pingFailures : 0;
     if (!server.enabled) {
       label = 'Paused';
-    } else if (!isNumber(server.pingAgeMs) || server.pingAgeMs < 0) {
+    } else if (!server.pingValid) {
       label = 'Pending';
     } else if (server.pingOk) {
       cls = 'ok';
       label = (isNumber(server.pingMs) ? Math.round(server.pingMs) : 0) + ' ms';
-    } else {
+    } else if (failures >= failureThreshold) {
       cls = 'err';
       label = 'Unreachable';
+    } else if (!server.pingEverReachable) {
+      label = 'n/a';
+    } else {
+      cls = failureClass(failures);
+      label = 'OK';
     }
     chip.className = 'chip ' + cls;
     chip.textContent = label;
     td.appendChild(chip);
+    if (!server.pingOk && server.pingError) {
+      var err = document.createElement('div');
+      err.className = 'err-text' +
+                       (cls === 'warn1' || cls === 'warn2' ? ' ' + cls : '');
+      err.textContent = (failures > 0 ? failures + ' failed: ' : '') + server.pingError;
+      td.appendChild(err);
+    }
     return td;
   }
 
@@ -229,6 +261,7 @@ inline const char kDashboardHtml[] PROGMEM = R"HTML(
   }
 
   function render(data) {
+    failureThreshold = isNumber(data.failureThreshold) ? data.failureThreshold : 3;
     rows.replaceChildren();
     for (var i = 0; i < data.servers.length; i++) {
       var server = data.servers[i];

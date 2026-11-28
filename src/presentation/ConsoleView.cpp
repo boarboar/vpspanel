@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "domain/HealthStatus.h"
 #include "domain/ServerRegistry.h"
 
 namespace {
@@ -80,8 +81,10 @@ void ConsoleView::onCycleStarted(size_t serverCount) {
 
 void ConsoleView::onPollFinished(const ServerConfig& server, const ServerMetrics& metrics) {
   if (!metrics.ok) {
-    Serial.printf("[fail] %s (%s): %s\n", server.displayName().c_str(),
-                  server.endpoint().c_str(), metrics.error.c_str());
+    Serial.printf("[fail] %s (%s) %u/%u: %s\n", server.displayName().c_str(),
+                  server.endpoint().c_str(),
+                  static_cast<unsigned>(metrics.consecutiveFailures),
+                  static_cast<unsigned>(kErrorAfterFailedAttempts), metrics.error.c_str());
     return;
   }
 
@@ -107,6 +110,7 @@ void ConsoleView::onPingFinished(const ServerConfig& server, const PingResult& p
     return;
   }
 
-  Serial.printf("[ping] %s (%s) unreachable: %s\n", server.displayName().c_str(),
-                server.endpoint().c_str(), ping.error.c_str());
+  Serial.printf("[ping] %s (%s) unreachable %u/%u: %s\n", server.displayName().c_str(),
+                server.endpoint().c_str(), static_cast<unsigned>(ping.consecutiveFailures),
+                static_cast<unsigned>(kErrorAfterFailedAttempts), ping.error.c_str());
 }

@@ -55,8 +55,16 @@ class TftDashboard {
  private:
 #if VPSPANEL_HAS_DISPLAY
   static constexpr size_t kServersPerPage = 4;
+  static constexpr size_t kSystemInfoRows = 7;
 
-  enum class View : uint8_t { Splash, Setup, Dashboard, Detail };
+  enum class View : uint8_t {
+    Splash,
+    Setup,
+    Dashboard,
+    Detail,
+    SystemMenu,
+    SystemInfo,
+  };
 
   // Which set of widgets occupies the lower half of a card. When it changes,
   // that area is cleared once before the new widgets are drawn.
@@ -107,8 +115,8 @@ class TftDashboard {
     TextField cores;  // "8 cores"
     TextField mem;
     TextField disk;
-    TextField info;   // uptime, or the waiting/error message
-    uint8_t infoKind = 0;  // 0 = uptime, 1 = muted note, 2 = error
+    TextField info;      // SSH state: uptime or failure summary
+    TextField pingInfo;  // PING state: RTT or failure summary
     int cpuBarFilled = -1;
     uint16_t cpuBarColor = 0;
     int barFilled = -1;
@@ -150,6 +158,17 @@ class TftDashboard {
   void drawDetailFrame();
   void renderDetail(const MonitorService::Snapshot& snapshot);
 
+  void openSystemMenu();
+  void closeSystemMenu(uint32_t now);
+  void moveSystemMenu(int delta);
+  void activateSystemMenu();
+  void drawSystemMenu();
+
+  void openSystemInfo();
+  void closeSystemInfo();
+  void drawSystemInfoFrame();
+  void renderSystemInfo();
+
   TFT_eSPI tft_;
   ButtonInput buttons_;
   View view_ = View::Splash;
@@ -176,6 +195,17 @@ class TftDashboard {
   uint32_t lastPageMs_ = 0;
 
   DetailCache detail_;
+
+  // System menu state. The menu is redrawn only when its selection changes.
+  uint8_t menuSelection_ = 0;
+  uint8_t menuDrawnSelection_ = 0;
+  bool menuDrawn_ = false;
+
+  // System info screen: the frame (labels and separators) is drawn once per
+  // visit, the values are refreshed once per second.
+  bool infoFrameDrawn_ = false;
+  uint32_t lastInfoRefreshMs_ = 0;
+  TextField infoValues_[kSystemInfoRows];
 #endif
 
   MonitorService& monitor_;
