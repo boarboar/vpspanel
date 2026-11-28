@@ -35,6 +35,8 @@ independent schedule.
 - Three buttons (**A/B/C**) on the TFT build: select a card, open its detail
   screen, return to the dashboard, and enter Wi-Fi credentials with an on-screen
   keyboard from the boot splash.
+- **A+B** opens a system menu with Close, Info, Settings, Reboot and Factory
+  reset. A/C move the selection and B activates it.
 
 ## Setup
 
@@ -85,6 +87,13 @@ If you connect the optional TFT panel, wire it as described in
 Server entries can be **paused** instead of deleted; paused hosts keep their
 last measurement and are skipped by the poller.
 
+The dashboard uses the same failure tolerance as the TFT panel: after a
+successful poll, the first two consecutive SSH or ping failures keep the `OK`
+label but turn it yellow and then orange; the third failure changes it to
+`Error` / `Unreachable`. If every attempt so far has failed, the status is shown
+as `n/a` until the third failure. The failure count and the last error are shown
+under the affected chip.
+
 ## TFT display (TJCTM24024-SPI / ILI9341)
 
 The firmware can drive a 2.4" 240x320 ILI9341 SPI module (TJCTM24024-SPI) as a
@@ -95,6 +104,11 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
   RTT (`OK 12ms` / `DOWN`), state chip (`OK` / `ERROR` / `WAIT`), and
   three usage gauges for CPU, memory and disk. Each gauge fills red for the used
   part and green for the free part, with the percentage written on it in white.
+  After a successful poll, a single failed SSH or ping poll keeps the `OK` label
+  but turns it yellow; the second consecutive failure turns it orange; only the
+  third consecutive failure switches the state to `ERROR` / `DOWN`. If no poll
+  has succeeded yet, the state is `n/a` until the third failure. SSH and ping are
+  counted independently.
   Paused servers are omitted from the panel (they stay visible in the web UI),
   so they never take a card, a page slot or a selection stop.
 - Footer: both poll intervals (`ssh 60s / ping 15s`), `polling...`/`pinging...`
@@ -106,7 +120,9 @@ local dashboard. It renders the same `MonitorService` snapshots as the web page:
 - A full-screen per-server detail view with four stacked sections: the identity
   block (name, state, endpoint and ping reachability/RTT), CPU (usage with a
   bar, load average and core count), memory, disk (used/total/percentage with a
-  bar, like memory) and info (host uptime, or the waiting/SSH error message).
+  bar, like memory) and info. The info section shows the host uptime while the
+  SSH poll is healthy, plus one line each for SSH and ping with the number of
+  consecutive failed attempts and the last error when they fail.
   Opened from Selection mode with button C.
 
 ### Buttons
@@ -117,10 +133,17 @@ if the GPIO 2 button lead is long, add an external 10k pull-up to 3V3.
 
 | Button | ESP32-C3 | Function                                                     |
 | ------ | -------- | ------------------------------------------------------------ |
-| A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card; setup screen: previous key |
-| B      | GPIO 1   | Enter Selection mode / open details / back / press setup key |
-| C      | GPIO 2   | Selection mode: next card; setup screen: next key             |
+| A      | GPIO 0   | Boot splash: open Wi-Fi setup; Selection mode: previous card; setup screen: previous key; system menu: previous item |
+| B      | GPIO 1   | Enter Selection mode / open details / back / press setup key / activate menu item |
+| C      | GPIO 2   | Selection mode: next card; setup screen: next key; system menu: next item |
 | common | GND      |                                                              |
+
+Pressing **A+B** together on the dashboard or detail screen opens the system
+menu. Its items are **Close**, **Info**, **Settings**, **Reboot** and **Factory
+reset**. **Close** returns to the dashboard, **Info** opens a system information
+screen (free RAM, free flash, PSRAM, chip temperature, SSID, MAC and IP
+address; B returns to the menu), and **Reboot** restarts the board. Settings and
+Factory reset are not implemented yet.
 
 The B and C roles are swapped (`VPSPANEL_SWAP_B_C` in
 `src/config/input_config.h`): the reliable GPIO 1 button performs the C actions,
@@ -283,6 +306,7 @@ src/
 │   ├── ServerConfig.h           one monitored host (plain data)
 │   ├── ServerMetrics.h          one SSH measurement (plain data)
 │   ├── PingResult.h             one ICMP reachability measurement (plain data)
+│   ├── HealthStatus.h           OK/warning/error levels and failure threshold
 │   ├── MetricsParser.{h,cpp}    parses "LOAD:.. RAM:.. DISK:.. CORES:.. UPTIME:.. CPU:.."
 │   ├── ServerStore.h            persistence port (interface)
 │   ├── ServerRegistry.{h,cpp}   thread-safe server list + settings CRUD
